@@ -2,13 +2,18 @@
 
 Prices are quoted per MILLION tokens. For one row of usage:
 
-    input cost       = input_tokens       / 1e6 * input_price
-    output cost      = output_tokens      / 1e6 * output_price
-    cache write cost = cache_write_tokens / 1e6 * input_price * 1.25
-    cache read cost  = cache_read_tokens  / 1e6 * input_price * 0.10
-    total            = the four added together
+    input cost          = input_tokens          / 1e6 * input_price
+    output cost         = output_tokens         / 1e6 * output_price
+    cache write (5 min) = cache_write_5m_tokens / 1e6 * input_price * 1.25
+    cache write (1 hr)  = cache_write_1h_tokens / 1e6 * input_price * 2.00
+    cache read          = cache_read_tokens     / 1e6 * input_price * 0.10
+    total               = the five added together
 
 That is the whole thing. Everything else in this file is bookkeeping around it.
+
+The two kinds of cache write are kept apart because they cost 1.25x and 2.00x —
+a 60% difference. Claude Code turns out to use the 1-hour cache exclusively, so
+guessing "5 minute" would have under-counted a large part of the bill.
 """
 
 import os
@@ -31,19 +36,26 @@ class UnknownModelError(KeyError):
 
 @dataclass(frozen=True)
 class CostBreakdown:
-    """The four pieces of a cost, kept separate so the math can be checked."""
+    """The pieces of a cost, kept separate so the math can be checked by hand."""
 
     input_cost: float
     output_cost: float
-    cache_write_cost: float
+    cache_write_5m_cost: float
+    cache_write_1h_cost: float
     cache_read_cost: float
+
+    @property
+    def cache_write_cost(self) -> float:
+        """Both kinds of cache write, for display."""
+        return self.cache_write_5m_cost + self.cache_write_1h_cost
 
     @property
     def total(self) -> float:
         return (
             self.input_cost
             + self.output_cost
-            + self.cache_write_cost
+            + self.cache_write_5m_cost
+            + self.cache_write_1h_cost
             + self.cache_read_cost
         )
 
@@ -51,7 +63,8 @@ class CostBreakdown:
         return {
             "input_cost": self.input_cost,
             "output_cost": self.output_cost,
-            "cache_write_cost": self.cache_write_cost,
+            "cache_write_5m_cost": self.cache_write_5m_cost,
+            "cache_write_1h_cost": self.cache_write_1h_cost,
             "cache_read_cost": self.cache_read_cost,
             "total_cost": self.total,
         }
@@ -91,17 +104,11 @@ class PriceBook:
         model: str,
         input_tokens: int = 0,
         output_tokens: int = 0,
-        cache_write_tokens: int = 0,
+        cache_write_5m_tokens: int = 0,
+        cache_write_1h_tokens: int = 0,
         cache_read_tokens: int = 0,
-        long_cache: bool = False,
     ) -> CostBreakdown:
-        """Cost of one row of usage, split into its four pieces.
-
-        Set long_cache=True if the cache writes used the 1-hour cache, which
-        costs 2.0x input instead of 1.25x. We default to False because Claude
-        Code uses the 5-minute cache. (This is one of the things to confirm
-        against real logs — see CLAUDE.md.)
-        """
+        """Cost of one row of usage, split into its pieces."""
         if model not in self._models:
             raise UnknownModelError(
                 "No price for model %r. Known models: %s. "
@@ -113,10 +120,6 @@ class PriceBook:
         input_price = float(entry["input_per_mtok"])
         output_price = float(entry["output_per_mtok"])
 
-        write_multiplier = (
-            self.cache_write_1h_multiplier if long_cache else self.cache_write_multiplier
-        )
-
         # A few models price cache reads as a flat rate rather than as a
         # multiple of the input price. prices.yaml can say so per model.
         if "cache_read_per_mtok" in entry:
@@ -124,13 +127,22 @@ class PriceBook:
         else:
             cache_read_price = input_price * self.cache_read_multiplier
 
+        per_million = lambda tokens: tokens / TOKENS_PER_MILLION
+
         return CostBreakdown(
-            input_cost=input_tokens / TOKENS_PER_MILLION * input_price,
-            output_cost=output_tokens / TOKENS_PER_MILLION * output_price,
-            cache_write_cost=(
-                cache_write_tokens / TOKENS_PER_MILLION * input_price * write_multiplier
+            input_cost=per_million(input_tokens) * input_price,
+            output_cost=per_million(output_tokens) * output_price,
+            cache_write_5m_cost=(
+                per_million(cache_write_5m_tokens)
+                * input_price
+                * self.cache_write_multiplier
             ),
-            cache_read_cost=cache_read_tokens / TOKENS_PER_MILLION * cache_read_price,
+            cache_write_1h_cost=(
+                per_million(cache_write_1h_tokens)
+                * input_price
+                * self.cache_write_1h_multiplier
+            ),
+            cache_read_cost=per_million(cache_read_tokens) * cache_read_price,
         )
 
     def cost(self, model: str, **tokens) -> float:
@@ -141,7 +153,6 @@ class PriceBook:
 def add_estimated_cost(
     frame: pd.DataFrame,
     prices: Optional[PriceBook] = None,
-    long_cache: bool = False,
 ) -> pd.DataFrame:
     """Fill in the estimated_cost column for a whole table.
 
@@ -158,9 +169,9 @@ def add_estimated_cost(
                 model=row["model"],
                 input_tokens=int(row["input_tokens"]),
                 output_tokens=int(row["output_tokens"]),
-                cache_write_tokens=int(row["cache_write_tokens"]),
+                cache_write_5m_tokens=int(row["cache_write_5m_tokens"]),
+                cache_write_1h_tokens=int(row["cache_write_1h_tokens"]),
                 cache_read_tokens=int(row["cache_read_tokens"]),
-                long_cache=long_cache,
             ).total
         except UnknownModelError:
             return float("nan")
@@ -178,14 +189,23 @@ def unpriced_models(frame: pd.DataFrame) -> List[str]:
     return sorted(set(missing.dropna().astype(str)))
 
 
+COST_PIECES = [
+    "input_cost",
+    "output_cost",
+    "cache_write_5m_cost",
+    "cache_write_1h_cost",
+    "cache_read_cost",
+    "total_cost",
+]
+
+
 def breakdown_frame(
     frame: pd.DataFrame,
     prices: Optional[PriceBook] = None,
-    long_cache: bool = False,
 ) -> pd.DataFrame:
     """The same table plus one column per cost piece.
 
-    This is what the accuracy check prints, so the four numbers can be compared
+    This is what the accuracy check prints, so every number can be compared
     against a hand calculation line by line.
     """
     prices = prices or PriceBook.load()
@@ -196,19 +216,12 @@ def breakdown_frame(
                 model=row["model"],
                 input_tokens=int(row["input_tokens"]),
                 output_tokens=int(row["output_tokens"]),
-                cache_write_tokens=int(row["cache_write_tokens"]),
+                cache_write_5m_tokens=int(row["cache_write_5m_tokens"]),
+                cache_write_1h_tokens=int(row["cache_write_1h_tokens"]),
                 cache_read_tokens=int(row["cache_read_tokens"]),
-                long_cache=long_cache,
             ).as_dict()
         except UnknownModelError:
-            nan = float("nan")
-            parts = {
-                "input_cost": nan,
-                "output_cost": nan,
-                "cache_write_cost": nan,
-                "cache_read_cost": nan,
-                "total_cost": nan,
-            }
+            parts = {name: float("nan") for name in COST_PIECES}
         pieces.append(parts)
 
     return pd.concat(

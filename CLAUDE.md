@@ -67,8 +67,9 @@ Nothing downstream knows or cares where a row came from.
 | `session_id` | Groups rows into one working session |
 | `input_tokens` | Fresh input tokens (not cached) |
 | `output_tokens` | Tokens the model generated |
-| `cache_write_tokens` | Tokens written into the prompt cache |
-| `cache_read_tokens` | Tokens read back out of the cache |
+| `cache_write_5m_tokens` | Written into the 5-minute cache — costs 1.25x input |
+| `cache_write_1h_tokens` | Written into the 1-hour cache — costs 2.00x input |
+| `cache_read_tokens` | Read back out of the cache — costs 0.10x input |
 | `estimated_cost` | Dollars, from the formula below |
 | `source` | Which adapter produced the row |
 | `is_estimate` | `True` = computed by us, `False` = a real billed figure |
@@ -76,10 +77,10 @@ Nothing downstream knows or cares where a row came from.
 One row = one API call. That's the finest grain available, and everything else (sessions, days,
 months) is a grouping of those rows.
 
-**Two changes from the original column list, both deliberate:**
-- Cache is **two columns**, not one. Cache writes and reads are priced about 12x apart, so merging
-  them would blow the 5% accuracy target. The dashboard can still show one combined "cached"
-  number — it just adds the two.
+**Changes from the original column list, all deliberate:**
+- Cache is **three columns**, not one. The three kinds cost 1.25x, 2.00x and 0.10x of the input
+  price — up to 20x apart — so merging them would blow the 5% accuracy target. The dashboard can
+  still show one combined "cached" number; it just adds them up (`schema.cache_write_tokens`).
 - Added **`project`**. "Break usage down by project" is a must-have and there was nowhere to put
   the project name. Hiding it inside `session_id` would have been a trap for later.
 
@@ -89,11 +90,11 @@ API prices are quoted **per million tokens**. For every row in the table:
 
 1. **Input cost** = input_tokens ÷ 1,000,000 × the model's input price
 2. **Output cost** = output_tokens ÷ 1,000,000 × the model's output price
-3. **Cache write cost** = cache_write_tokens ÷ 1,000,000 × input price × **1.25**
-   (writing to the cache costs 25% more than normal input)
-4. **Cache read cost** = cache_read_tokens ÷ 1,000,000 × input price × **0.10**
+3. **Cache write (5 min)** = cache_write_5m_tokens ÷ 1,000,000 × input price × **1.25**
+4. **Cache write (1 hour)** = cache_write_1h_tokens ÷ 1,000,000 × input price × **2.00**
+5. **Cache read** = cache_read_tokens ÷ 1,000,000 × input price × **0.10**
    (reading from the cache costs 10% of normal input — a 90% discount)
-5. **Total** = add all four together.
+6. **Total** = add all five together.
 
 **Worked example** — one session on Claude Opus 5 ($5.00 input / $25.00 output per million):
 
@@ -101,16 +102,30 @@ API prices are quoted **per million tokens**. For every row in the table:
 |---|---|---|---|
 | Input | 50,000 | 0.05 × $5.00 | $0.25 |
 | Output | 8,000 | 0.008 × $25.00 | $0.20 |
-| Cache write | 120,000 | 0.12 × $5.00 × 1.25 | $0.75 |
+| Cache write, 5 min | 40,000 | 0.04 × $5.00 × 1.25 | $0.25 |
+| Cache write, 1 hour | 80,000 | 0.08 × $5.00 × 2.00 | $0.80 |
 | Cache read | 900,000 | 0.90 × $5.00 × 0.10 | $0.45 |
-| **Total** | | | **$1.65** |
+| **Total** | | | **$1.95** |
 
-Note how cache reads dominate the token count but barely touch the cost. Any chart that plots
-"tokens" without separating cache reads will be misleading — say so on the chart.
+Note how cache reads dominate the token count but take under a quarter of the cost. Any chart that
+plots "tokens" without separating cache reads will be misleading — say so on the chart.
 
-**Two things to verify against real logs before trusting any number:**
-- That `input_tokens` in the log already *excludes* cached tokens (if it doesn't, we'd double-count).
-- Whether any entries use the 1-hour cache, which costs 2.0x input instead of 1.25x.
+## What the real logs turned out to say
+
+Both open questions are now answered, and one answer was the opposite of the obvious guess. These
+are facts about the log format, checked against 9 real log files:
+
+- **`input_tokens` already excludes cached tokens.** No double-counting. (Typical value: 2.)
+- **Claude Code uses the 1-hour cache, 100% of the time** — so cache writes cost **2.00x** input,
+  not 1.25x. Assuming the cheaper cache would have under-counted that piece by 37.5%.
+- **One API call is written to the log as several lines** — one per content block, each repeating
+  the *same* usage numbers, sharing a `requestId` and a `message.id` and differing only in
+  `apiBlockIndex`. Counting every line **overstated total tokens by 104%**. The adapter keeps one
+  row per `requestId`.
+- Everything so far is `speed: standard` and `service_tier: standard`. Fast mode and batch are
+  priced differently, so the adapter warns if that ever changes rather than quietly misreporting.
+- `cwd` gives the project name. Note `mba-advisor/mba_materials` shows up as its own project
+  (`mba_materials`) because it's a subfolder — decide later whether to merge it into `mba-advisor`.
 
 ## Where prices come from
 
@@ -121,6 +136,32 @@ A script fetches current prices from Anthropic's public pricing page and writes 
 This keeps prices current without breaking the privacy rule: the fetch sends no usage data, just
 asks for a public page, and the result is a plain text file Katie can read and correct by hand.
 `prices.yaml` is committed to git so the numbers are versioned.
+
+## Chart and design rules
+
+Colours live in `burnrate/theme.py`, never inline in `app.py`. Four rules, and they
+are not stylistic preferences:
+
+- **Colour follows the thing, not its rank.** "Cache read" is always the same pink,
+  even when filtered. Assigning colours by position means filtering repaints the
+  survivors and misleads anyone who had learned the chart.
+- **The palette is validated, not chosen by eye.** Every adjacent pair of series
+  colours stays distinguishable under the three main kinds of colour blindness. If
+  you change a hue, re-run the check rather than trusting your eyes.
+- **One series, one colour.** Shading bars darker-where-bigger just restates the bar
+  length and wastes the only free channel.
+- **Text never wears the series colour.** Labels use ink; the coloured mark beside
+  them carries the identity. Several of these hues are illegible as text.
+
+Forms to avoid, each for a reason: no pie or donut charts (people compare angles
+badly — part-to-whole belongs in a stacked bar); no one-bar bar charts (that's a
+number, so show a stat tile — this happens live when only one model is in range);
+no dual axes; exactly one hero number per screen.
+
+The theme is pinned to light mode in `.streamlit/config.toml`. An automatic dark
+flip would use colours nobody validated. Real dark mode means re-deriving every hue
+against the dark surface and re-running the check — worth doing deliberately, not
+as a side effect.
 
 ## Privacy and secrets — non-negotiable
 
@@ -176,6 +217,58 @@ burn-rate/
   the fake-data adapter, and 15 tests — all passing. The CLAUDE.md worked example ($1.65) is a
   test, so the docs and the code can't drift apart.
 - Added a `project` column to the schema (see note above).
-- Day-to-day commands: `uv run pytest` and `uv run streamlit run app.py`.
-- **Next:** write the real Claude Code adapter (`adapters/claude_code.py`), then do the accuracy
-  check against three real sessions — that's checkpoint 1.
+- Wrote the real Claude Code adapter and inspected the actual logs. Two findings changed the cost
+  math — the 1-hour cache, and duplicate log lines per API call. See "What the real logs turned
+  out to say" above. Split `cache_write_tokens` into 5m/1h columns as a result.
+- **Checkpoint 1 passed.** `uv run python scripts/accuracy_check.py` compares three real sessions
+  against an independent hand calculation: all three agree to four decimal places.
+- **Checkpoint 2 passed.** Dashboard built and running (`uv run streamlit run app.py`): scope
+  banner, month-to-date tiles, forecast, daily trend, by model / project, tokens-vs-dollars,
+  cost per session, savings suggestions. Calculations live in `analysis.py` and `insights.py`
+  so they're testable; `app.py` is only layout.
+- README written and verified against the actual install steps.
+- 34 tests passing. Day-to-day: `uv run pytest`, `uv run python scripts/accuracy_check.py`.
+- Decided to build on Claude Code logs alone. Found that `~/Library/Application Support/Claude/
+  plan-usage-history.json` holds plan-limit utilisation samples (likely % of 5-hour and weekly
+  limits) — a possible second source, deferred for now.
+- **Design pass done.** Added `burnrate/theme.py` (validated palette, chart chrome) and
+  `.streamlit/config.toml` (pinned light theme, Streamlit telemetry off). Replaced the two
+  donut charts with one two-row stacked bar — the tokens-vs-dollars comparison now reads in a
+  single glance instead of asking you to compare two pies. The "by model" panel becomes a stat
+  tile when only one model is in range. Added a hero number, compact number formatting, and
+  rounded bar ends with hairline gridlines. See "Chart and design rules" above.
+### Where things stand at the end of session 1
+
+All must-haves are built. Checkpoints 1 and 2 both passed. 34 tests green.
+
+**To start up again:**
+
+```bash
+uv run streamlit run app.py          # the dashboard
+uv run pytest                        # the tests
+uv run python scripts/accuracy_check.py   # prove the cost maths against real logs
+```
+
+**Open decisions, none urgent:**
+
+1. **Stretch goal** — Parley API usage logging was the pick, but it has the most unknowns. The
+   fallback with the most value for the least work is the `plan-usage-history.json` source noted
+   above: it's actual plan utilisation rather than estimated value, which speaks directly to
+   "am I using the subscription well?". It needs confirming that `fh` / `cw` really are percent
+   of the 5-hour and weekly limits — that reading is an inference from the data's shape, not
+   something verified.
+2. **`mba_materials`** currently counts as its own project because it's a subfolder of
+   `mba-advisor`. Fold them together, or leave them separate?
+3. **Dark mode** is deliberately off. Turning it on means re-deriving every chart colour against
+   the dark surface and re-running the colourblind check.
+
+**Known soft spots, worth saying out loud:**
+
+- The forecast is a plain daily run-rate and will swing wildly early in a month. It refuses to
+  show a number until 7 days in, which is honest but blunt.
+- The accuracy check and the real code share `prices.yaml` and the same deduplication rule, so
+  they confirm the arithmetic, not the choice to deduplicate by `requestId`. That choice rests
+  on the log structure (identical usage, one `message.id`, differing `apiBlockIndex`), which is
+  reasoning rather than a test.
+- Only one model appears in the logs so far, so the by-model view has never been exercised with
+  real variety.

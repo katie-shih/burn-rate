@@ -1,0 +1,16 @@
+# Pinned to the light theme on purpose: the chart palette was validated for
+# colourblind-safety against the light surface below. An automatic dark flip
+# would use colours nobody checked. A proper dark mode means re-stepping every
+# hue for the dark surface and re-running the validator — worth doing, but as a
+# deliberate piece of work rather than a side effect.
+
+[theme]
+base = "light"
+backgroundColor = "#fcfcfb"
+secondaryBackgroundColor = "#f9f9f7"
+textColor = "#0b0b0b"
+primaryColor = "#2a78d6"
+font = "sans-serif"
+
+[browser]
+gatherUsageStats = false

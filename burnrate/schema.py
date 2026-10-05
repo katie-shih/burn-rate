@@ -17,10 +17,11 @@ COLUMNS: List[str] = [
     "project",              # which folder/workspace the usage happened in
     "model",                # e.g. "claude-opus-5"
     "session_id",           # groups rows into one working session
-    "input_tokens",         # fresh input tokens (NOT the cached ones)
-    "output_tokens",        # tokens the model generated
-    "cache_write_tokens",   # tokens written into the prompt cache
-    "cache_read_tokens",    # tokens read back out of the cache
+    "input_tokens",           # fresh input tokens (NOT the cached ones)
+    "output_tokens",          # tokens the model generated
+    "cache_write_5m_tokens",  # written into the 5-minute cache  (costs 1.25x input)
+    "cache_write_1h_tokens",  # written into the 1-hour cache    (costs 2.00x input)
+    "cache_read_tokens",      # read back out of the cache       (costs 0.10x input)
     "estimated_cost",       # dollars, from burnrate.pricing
     "source",               # which adapter produced this row
     "is_estimate",          # True = we computed it, False = a real billed figure
@@ -29,7 +30,8 @@ COLUMNS: List[str] = [
 TOKEN_COLUMNS: List[str] = [
     "input_tokens",
     "output_tokens",
-    "cache_write_tokens",
+    "cache_write_5m_tokens",
+    "cache_write_1h_tokens",
     "cache_read_tokens",
 ]
 
@@ -114,9 +116,17 @@ def validate(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def total_tokens(frame: pd.DataFrame) -> pd.Series:
-    """All four token kinds added together.
+    """All token kinds added together.
 
     Careful with this number: cache reads usually dwarf everything else, so a
     chart of 'total tokens' says much more about caching than about work done.
     """
     return frame[TOKEN_COLUMNS].sum(axis=1)
+
+
+def cache_write_tokens(frame: pd.DataFrame) -> pd.Series:
+    """Both kinds of cache write added together, for display only.
+
+    Never price off this — the two kinds cost 1.25x and 2.00x of input.
+    """
+    return frame["cache_write_5m_tokens"] + frame["cache_write_1h_tokens"]
