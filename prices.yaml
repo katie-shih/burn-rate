@@ -1,0 +1,57 @@
+# Anthropic API prices, in US dollars per MILLION tokens.
+#
+# This file is the single source of truth for every cost number in the dashboard.
+# The app never calls the network — it only reads this file.
+# To update it, run:  uv run python scripts/refresh_prices.py
+#
+# You can also edit it by hand. If a number here looks wrong, fix it —
+# nothing else needs to change.
+
+fetched: "2026-10-05"
+source: "https://docs.claude.com/en/docs/about-claude/pricing"
+note: "Seeded from Anthropic's published API pricing. Verify before trusting cost figures."
+
+# How cached tokens are priced, as a multiple of the model's INPUT price.
+cache_multipliers:
+  write_5m: 1.25   # writing to the 5-minute cache costs 25% more than normal input
+  write_1h: 2.00   # writing to the 1-hour cache costs double normal input
+  read: 0.10       # reading from the cache costs 10% of normal input
+
+models:
+  claude-opus-5-5:
+    input_per_mtok: 4.00
+    output_per_mtok: 20.00
+    # This model prices cache reads as a flat rate, not as a multiple of input.
+    cache_read_per_mtok: 0.20
+  claude-opus-5:
+    input_per_mtok: 5.00
+    output_per_mtok: 25.00
+  claude-opus-4-8:
+    input_per_mtok: 5.00
+    output_per_mtok: 25.00
+  claude-opus-4-7:
+    input_per_mtok: 5.00
+    output_per_mtok: 25.00
+  claude-opus-4-6:
+    input_per_mtok: 5.00
+    output_per_mtok: 25.00
+  claude-sonnet-5-5:
+    input_per_mtok: 2.00
+    output_per_mtok: 10.00
+  claude-sonnet-5:
+    input_per_mtok: 2.00
+    output_per_mtok: 10.00
+  claude-sonnet-4-6:
+    input_per_mtok: 3.00
+    output_per_mtok: 15.00
+  claude-haiku-4-5:
+    input_per_mtok: 1.00
+    output_per_mtok: 5.00
+  claude-fable-5-1:
+    input_per_mtok: 10.00
+    output_per_mtok: 50.00
+    # This model prices cache reads as a flat rate, not as a multiple of input.
+    cache_read_per_mtok: 0.25
+  claude-fable-5:
+    input_per_mtok: 10.00
+    output_per_mtok: 50.00

@@ -1,0 +1,22 @@
+[project]
+name = "burn-rate"
+version = "0.1.0"
+description = "A local dashboard for AI token usage and API-equivalent cost."
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.40",
+    "pandas>=2.2",
+    "pyyaml>=6.0",
+    "altair>=5.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets the tests import the `burnrate` package straight from this folder,
+# without having to install it first.
+pythonpath = ["."]
