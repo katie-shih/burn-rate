@@ -55,13 +55,24 @@ That's it. There's no configuration, no API key, and no account to create.
 
 | Section | What it tells you |
 |---|---|
-| **This month so far** | Estimated value, API calls, sessions, output tokens |
+| **Period selector** | Day / Week / Month / Total, or a custom date range |
+| **Tokens and value** | The two headline measures, side by side on purpose |
+| **Trend tiles** | Last 7 days, last 30 days, per active day, month so far |
 | **Month-end forecast** | Projected total at your current daily rate |
+| **By tool** | Share of spend per tool, with model and call counts |
 | **Daily trend** | Which days were expensive, and which were quiet |
 | **Where it goes** | Broken down by model and by project |
 | **Tokens vs. dollars** | Why "total tokens" is a misleading headline |
-| **Cost per session** | Every working session, most expensive first |
+| **Breakdown** | Daily, by project, or by session — with token-type columns |
 | **Where you could save** | Findings with the arithmetic behind them |
+
+Two notes on reading it:
+
+- The windows are **rolling**, not calendar. "Week" means the last 7 days
+  including today, so a Monday morning doesn't look like a collapse in usage.
+  The daily average divides by days you actually worked, not calendar days.
+- The **Reasoning** column is already inside **Output**. It's the thinking the
+  model did before replying, shown because it's interesting — never added on.
 
 The one most people find surprising is **Tokens vs. dollars**. Cache reads are
 usually ~97% of your tokens but only ~50% of your cost, because re-reading

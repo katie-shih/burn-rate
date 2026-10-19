@@ -23,6 +23,10 @@ them. Both were found by inspecting real logs, and both are handled here:
 
 Also worth knowing: ``input_tokens`` already EXCLUDES cached tokens, so the
 four token counts can be added without double-counting.
+
+``usage.output_tokens_details.thinking_tokens`` is carried through as
+``reasoning_tokens``. It is part of ``output_tokens``, not an addition to it,
+so it is reported and never summed — see burnrate.schema.REPORTED_COLUMNS.
 """
 
 import json
@@ -195,6 +199,11 @@ def _row_from_entry(entry: Dict, report: LoadReport) -> Optional[Dict]:
         "cache_write_5m_tokens": write_5m or 0,
         "cache_write_1h_tokens": write_1h or 0,
         "cache_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
+        # Thinking is reported inside output, not beside it, so this is a
+        # SUBSET of output_tokens and must never be added to a total.
+        "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
+            "thinking_tokens", 0
+        ) or 0,
         "estimated_cost": None,  # filled in by burnrate.pricing
         "source": "claude_code",
         "is_estimate": True,  # nobody billed this; it's API-equivalent value

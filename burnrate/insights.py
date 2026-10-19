@@ -174,3 +174,137 @@ def _one_project_dominates(frame: pd.DataFrame) -> Optional[Suggestion]:
         dollars=float(top["estimated_cost"]),
         caveat="This is where the money went, not necessarily where it was wasted.",
     )
+
+
+# ---------------------------------------------------------------- recommendations
+
+
+@dataclass
+class Recommendation:
+    """One short, actionable thing to try, and the number behind it."""
+
+    action: str      # the imperative, in a handful of words
+    because: str     # one clause citing a figure from this user's own data
+
+
+def recommendations(frame: pd.DataFrame, limit: int = 3) -> List[Recommendation]:
+    """Up to `limit` short ways to use fewer tokens.
+
+    This is the action-shaped sibling of savings_suggestions() above. Those
+    explain where the money went and show their arithmetic at length; these
+    say what to do about it in one line each. They read the same numbers from
+    burnrate.analysis, so the two cannot disagree about the facts.
+
+    THE ORDER IS FIXED, not sorted by a dollar figure, and that is deliberate.
+    Only some of these have a saving that can honestly be computed: the
+    cheaper-model one does, but "cache reads are 98% of your tokens" is an
+    amount AT STAKE, not an amount recoverable — you cannot stop a model
+    re-reading its own context. Sorting the two together would imply a
+    measured saving where there is none. The order below reflects how much
+    each typically moves the number, and the dashboard says so rather than
+    dressing it up as a calculation.
+
+    A rule that does not apply to this data stays silent, so a quiet month
+    produces fewer recommendations rather than filler.
+    """
+    if frame.empty:
+        return []
+
+    rules = (
+        _rec_fresh_sessions,
+        _rec_split_long_sessions,
+        _rec_cheaper_model,
+        _rec_trim_reasoning,
+    )
+    found = [rule(frame) for rule in rules]
+    return [rec for rec in found if rec is not None][:limit]
+
+
+def _rec_fresh_sessions(frame: pd.DataFrame) -> Optional[Recommendation]:
+    """Every call re-reads the whole conversation, so context length compounds."""
+    mix = analysis.token_mix(frame)
+    row = mix[mix["kind"] == "Cache read"]
+    if row.empty:
+        return None
+
+    share = float(row["token_share"].iloc[0])
+    if share < 0.5:
+        return None
+
+    return Recommendation(
+        action="Start a fresh session when you switch tasks",
+        because=(
+            f"Cache reads are {share:.0%} of your tokens — every message re-reads "
+            "the whole conversation, so a long session keeps paying for its own history."
+        ),
+    )
+
+
+def _rec_split_long_sessions(frame: pd.DataFrame) -> Optional[Recommendation]:
+    """Reuses the same comparison as the long-session suggestion above."""
+    sessions = analysis.by_session(frame)
+    if len(sessions) < 4:
+        return None
+
+    median_calls = sessions["calls"].median()
+    long_ones = sessions[sessions["calls"] > median_calls]
+    short_ones = sessions[sessions["calls"] <= median_calls]
+    if long_ones.empty or short_ones.empty:
+        return None
+
+    long_rate = float(long_ones["cost_per_call"].mean())
+    short_rate = float(short_ones["cost_per_call"].mean())
+    if short_rate <= 0 or long_rate <= short_rate * 1.2:
+        return None
+
+    return Recommendation(
+        action="Break long sessions into shorter ones",
+        because=(
+            f"Your longer sessions cost {long_rate / short_rate:.1f}x more per "
+            "message than your shorter ones."
+        ),
+    )
+
+
+def _rec_cheaper_model(frame: pd.DataFrame) -> Optional[Recommendation]:
+    """Anthropic rows only — Codex cannot run a Claude model."""
+    claude_only = frame[frame["provider"] == "anthropic"]
+    if claude_only.empty:
+        return None
+
+    actual = float(claude_only["estimated_cost"].sum())
+    models_used = set(claude_only["model"].dropna().astype(str))
+    if actual <= 0 or models_used == {"claude-sonnet-5"} or not models_used:
+        return None
+
+    alternative = analysis.cost_if_all_on_model(claude_only, "claude-sonnet-5")
+    if pd.isna(alternative) or alternative >= actual:
+        return None
+
+    return Recommendation(
+        action="Use a smaller model for routine work",
+        because=(
+            f"The same Claude tokens on Sonnet 5 would have cost "
+            f"${actual - alternative:,.2f} less."
+        ),
+    )
+
+
+def _rec_trim_reasoning(frame: pd.DataFrame) -> Optional[Recommendation]:
+    """Thinking tokens are billed as output, so they are not free."""
+    output = float(frame["output_tokens"].sum())
+    reasoning = float(frame["reasoning_tokens"].sum())
+    if output <= 0:
+        return None
+
+    share = reasoning / output
+    if share < 0.2:
+        return None
+
+    return Recommendation(
+        action="Lower the reasoning effort on simple tasks",
+        because=(
+            f"Thinking is {share:.0%} of your output tokens, and it is billed "
+            "at the same rate as the reply."
+        ),
+    )

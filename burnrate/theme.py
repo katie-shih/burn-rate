@@ -33,6 +33,7 @@ Three rules worth knowing before changing anything:
 
 import base64
 import os
+import re
 
 import altair as alt
 
@@ -51,6 +52,13 @@ INK_MUTED = "#bcaea5"      # axis labels — still clears 4.5:1, which the
 GRID = "#73393a"           # hairline gridlines, barely there
 BASELINE = "#814748"       # axis rules
 BORDER = "rgba(239,234,224,0.14)"
+
+# The stat tiles invert the page: beige ground, oxblood type. Inverting is
+# not free -- a pairing that reads well one way round can fail the other --
+# so these are checked by scripts/check_palette.py like everything else.
+TILE_SURFACE = "#ece8d7"      # beige, the same bone as the chart accent
+TILE_INK = "#5d2627"          # oxblood type on it
+TILE_INK_MUTED = "#7a4041"    # the tile's small-caps label
 
 # Status colours, re-stepped for a dark ground: on oxblood these have to be
 # light to register at all, where their light-theme counterparts were dark.
@@ -131,6 +139,22 @@ TRACKING_HEADING = "0.14em"
 TRACKING_LABEL = "0.18em"
 
 
+
+def _markdown_safe(html: str) -> str:
+    """Flatten the indentation of an HTML block before st.markdown sees it.
+
+    Markdown treats any line indented four spaces or more as a literal code
+    block, so a nicely indented <div> renders as escaped source on the page
+    instead of as markup. textwrap.dedent does not save you here: it removes
+    only the COMMON prefix, and one flush-left line (the opening <style>) is
+    enough to make that prefix zero while every other line stays indented.
+
+    Indentation is meaningless to both CSS and HTML, so the fix is simply to
+    strip it from every line.
+    """
+    return "\n".join(line.lstrip() for line in html.splitlines()).strip()
+
+
 def font_data_uri() -> str:
     """The vendored font as a data: URI, or '' if the file is missing.
 
@@ -166,7 +190,7 @@ def page_css() -> str:
         else "/* vendored font missing — falling back to the system stack */"
     )
 
-    return f"""
+    return _markdown_safe(f"""
     <style>
       {face}
 
@@ -220,7 +244,11 @@ def page_css() -> str:
       }}
 
       /* Columns of numbers line up; the hero number keeps proportional figures. */
-      [data-testid="stDataFrame"] {{ font-variant-numeric: tabular-nums; }}
+      [data-testid="stDataFrame"] {{
+        font-variant-numeric: tabular-nums;
+        border-radius: 6px;
+        overflow: hidden;   /* without this the square grid shows through */
+      }}
       [data-testid="stMetricValue"] {{
         font-size: 1.6rem;
         font-weight: 300;
@@ -229,6 +257,47 @@ def page_css() -> str:
       }}
 
       hr, [data-testid="stDivider"] {{ border-color: {BORDER}; }}
+
+      /* Period selector, drawn as a segmented control rather than radio
+         buttons. Streamlit has no segmented widget, so this is a radio group
+         with the circles hidden and the labels made into pills. The selected
+         one is found with :has(input:checked) — the real radio input is still
+         there underneath, so keyboard and screen-reader behaviour is
+         unchanged, and the control still works if :has() is unsupported (it
+         just looks like radio buttons again). */
+      [data-testid="stRadio"] [role="radiogroup"] {{
+        gap: 0.35rem;
+        flex-wrap: wrap;
+      }}
+      [data-testid="stRadio"] [role="radiogroup"] label {{
+        background: {SURFACE};
+        border: 1px solid {BORDER};
+        border-radius: 999px;
+        padding: 0.28rem 1rem;
+        margin: 0;
+        cursor: pointer;
+      }}
+      /* The radio circle. It is a nested div, not the span that wraps the
+         input, so hiding the span alone leaves the dot on screen. */
+      [data-testid="stRadio"] [role="radiogroup"] label > div > div:first-child {{
+        display: none;
+      }}
+      /* The option text is a <p>, which the global paragraph colour above
+         would otherwise paint cream-on-cream once the pill is filled. */
+      [data-testid="stRadio"] [role="radiogroup"] label p {{
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: {TRACKING_LABEL};
+        color: {INK_SECONDARY} !important;
+        margin: 0;
+      }}
+      [data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) {{
+        background: {INK};
+        border-color: {INK};
+      }}
+      [data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) p {{
+        color: {PAGE} !important;
+      }}
 
       /* Filter pills.
          Streamlit fills these with primaryColor and sets the text to white,
@@ -247,7 +316,7 @@ def page_css() -> str:
         fill: {INK_SECONDARY} !important;
       }}
     </style>
-    """
+    """)
 
 
 # -- chart specs ---------------------------------------------------------
@@ -255,6 +324,7 @@ def page_css() -> str:
 BAR_SIZE = 22       # cap bar thickness; the leftover band is deliberate air
 CORNER = 4          # rounded data-end, square at the baseline
 SURFACE_GAP = 2     # gap separating touching marks, in the surface colour
+PANEL_CORNER = 6    # the panel itself — matches the tiles and cards in CSS
 
 
 def token_scale() -> alt.Scale:
@@ -275,7 +345,10 @@ def style(chart: alt.Chart) -> alt.Chart:
     """
     return (
         chart.properties(padding={"left": 18, "top": 6, "right": 8, "bottom": 6})
-        .configure_view(stroke=None, fill=SURFACE)
+        # cornerRadius rounds the view's own background rectangle, which is
+        # the shaded panel behind the marks. Same radius as the HTML cards so
+        # a chart and a tile do not disagree by two pixels.
+        .configure_view(stroke=None, fill=SURFACE, cornerRadius=PANEL_CORNER)
         .configure_axis(
             labelColor=INK_MUTED,
             titleColor=INK_SECONDARY,
@@ -304,3 +377,214 @@ def style(chart: alt.Chart) -> alt.Chart:
         )
         .configure_text(font=FONT_STACK)
     )
+
+
+def scroll_rail(sections) -> str:
+    """A fixed rail on the left showing how far down the page you are.
+
+    `sections` is a list of (anchor_id, label). The ids are the ones Streamlit
+    already generates for its headings, so the links need nothing added to the
+    markup they point at.
+
+    HOW THE POSITION INDICATOR WORKS, since it looks like magic:
+
+    Streamlit strips <script> out of st.markdown, so there is no JavaScript
+    available and no scroll listener to attach. This instead uses a CSS
+    scroll-driven animation: `section[data-testid="stMain"]` is the element
+    that actually scrolls (not the window, which is why `scroll(root)` would
+    silently do nothing), so it publishes a named timeline and the fill
+    animates along it. No script, no polling, and it cannot fall out of sync
+    with the scrollbar because it IS the scrollbar position.
+
+    Browsers without scroll-driven animations show the rail with a full-height
+    track and no fill -- still a working table of contents, just not a
+    position indicator. The links work regardless.
+
+    The rail hides below 1100px, where the centred content would sit under it.
+    """
+    links = "\n".join(
+        f'<a href="#{anchor}">{label}</a>' for anchor, label in sections
+    )
+
+    # dedent + strip: st.markdown reads an indented block as literal code,
+    # which renders the rail as escaped HTML instead of a rail.
+    return _markdown_safe(f"""
+    <style>
+      /* The scroller publishes a timeline the rail can animate along. */
+      section[data-testid="stMain"] {{
+        scroll-timeline-name: --page;
+        scroll-timeline-axis: y;
+      }}
+      .stApp {{ timeline-scope: --page; }}
+
+      .burn-rail {{
+        position: fixed;
+        left: 1.25rem;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        gap: 0.7rem;
+        z-index: 90;
+        pointer-events: none;
+      }}
+      .burn-rail-track {{
+        width: 2px;
+        background: {BORDER};
+        border-radius: 2px;
+        position: relative;
+        overflow: hidden;
+      }}
+      .burn-rail-fill {{
+        position: absolute;
+        top: 0; left: 0;
+        width: 100%;
+        height: 0%;
+        background: {INK};
+        animation: burn-rail-grow linear both;
+        animation-timeline: --page;
+      }}
+      @keyframes burn-rail-grow {{
+        from {{ height: 0%; }}
+        to   {{ height: 100%; }}
+      }}
+
+      .burn-rail-links {{
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        pointer-events: auto;
+      }}
+      .burn-rail-links a {{
+        font-size: 0.62rem;
+        text-transform: uppercase;
+        /* Tighter than the label tracking used elsewhere: the rail is sized
+           by its longest entry, and generous tracking on "RECOMMENDATIONS"
+           is what pushes it into the content. */
+        letter-spacing: 0.1em;
+        color: {INK_MUTED};
+        text-decoration: none;
+        padding: 0.3rem 0;
+        white-space: nowrap;
+      }}
+      .burn-rail-links a:hover,
+      .burn-rail-links a:focus {{
+        color: {INK};
+        outline: none;
+      }}
+
+      /* Make room for the rail. Streamlit's content block has 80px of left
+         padding by default, which is less than the rail is wide, so without
+         this the labels sit on top of the numbers.
+         The breakpoint is 1250px rather than the rail's own width: the
+         "Where it goes" panels are a fixed ~870px, so the rail may only
+         appear where there is room for BOTH. */
+      @media (min-width: 1250px) {{
+        [data-testid="stMainBlockContainer"] {{ padding-left: 12rem !important; }}
+      }}
+      @media (max-width: 1249px) {{
+        .burn-rail {{ display: none; }}
+      }}
+    </style>
+
+    <div class="burn-rail">
+      <div class="burn-rail-track"><div class="burn-rail-fill"></div></div>
+      <div class="burn-rail-links">{links}</div>
+    </div>
+    """)
+
+
+# -- tool marks ----------------------------------------------------------
+#
+# The real Claude and OpenAI brand marks, vendored in burnrate/logos/ — see
+# SOURCE.md there for provenance and the trademark note. Like the font, they
+# are read off disk rather than fetched, so nothing goes out over the network
+# while the dashboard is running.
+
+LOGO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logos")
+
+# Anything with no logo file gets a plain square, so a newly added adapter
+# produces a tidy tile rather than a ragged, mark-less heading.
+FALLBACK_MARK = (
+    '<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.6">'
+    '<rect x="4.5" y="4.5" width="15" height="15" rx="2"/>'
+    "</svg>"
+)
+
+
+def tool_mark(product: str, size: int = 18) -> str:
+    """The brand mark for one tool, sized and recoloured to match its tile.
+
+    `currentColor` is the point: the file carries the shape and this sets the
+    ink, so a mark never needs editing when the palette changes. Simple Icons
+    paths have no fill of their own, which is what makes that work.
+    """
+    path = os.path.join(LOGO_DIR, f"{product}.svg")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            svg = handle.read()
+    except OSError:
+        return FALLBACK_MARK.format(size=size)
+
+    # The file is 24x24 with no sizing or colour of its own; add both.
+    svg = svg.replace(
+        "<svg ",
+        f'<svg width="{size}" height="{size}" fill="currentColor" ',
+        1,
+    )
+    # The <title> would show as a tooltip duplicating the label beside it.
+    return re.sub(r"<title>.*?</title>", "", svg, flags=re.S)
+
+
+def tool_tile(product: str, label: str, share: str, detail: str) -> str:
+    """A square beige tile for one tool.
+
+    Square because the row is capped at four across: with two tools and a full
+    row to fill, a tile stretched to half the page would be a letterbox with a
+    percentage floating in it.
+    """
+    return _markdown_safe(f"""
+    <div style="background:{TILE_SURFACE};border-radius:6px;
+                aspect-ratio:1/1;padding:1rem 1.1rem;
+                display:flex;flex-direction:column;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:0.45rem;color:{TILE_INK_MUTED};">
+        {tool_mark(product)}
+        <!-- The colour has to be inline. page_css sets `span {{ color: INK }}`
+             globally, and a rule that targets the span beats a colour merely
+             inherited from the parent div — which on a beige tile means cream
+             text on cream. -->
+        <span style="font-size:0.68rem;text-transform:uppercase;
+                     letter-spacing:{TRACKING_LABEL};
+                     color:{TILE_INK_MUTED};">{label}</span>
+      </div>
+      <div>
+        <div style="font-size:2.1rem;font-weight:300;line-height:1.1;
+                    color:{TILE_INK};">{share}</div>
+        <div style="font-size:0.76rem;color:{TILE_INK_MUTED};margin-top:0.3rem;">
+          {detail}
+        </div>
+      </div>
+    </div>
+    """)
+
+
+def recommendation_card(number: int, action: str, because: str) -> str:
+    """One numbered recommendation.
+
+    Beige like the stat tiles, because these are things to act on rather than
+    things to read past. Every piece of text carries its colour inline: page_css
+    styles `span`, `p` and `div` globally, and a rule that targets an element
+    beats a colour inherited from its parent — which on a beige card means
+    cream on cream.
+    """
+    return _markdown_safe(f"""
+    <div style="background:{TILE_SURFACE};border-radius:{PANEL_CORNER}px;
+                padding:1rem 1.1rem;height:100%;">
+      <div style="font-size:0.7rem;color:{TILE_INK_MUTED};
+                  letter-spacing:{TRACKING_LABEL};">{number:02d}</div>
+      <div style="font-size:1.0rem;font-weight:400;line-height:1.35;
+                  color:{TILE_INK};margin:0.35rem 0 0.4rem 0;">{action}</div>
+      <div style="font-size:0.8rem;line-height:1.45;
+                  color:{TILE_INK_MUTED};">{because}</div>
+    </div>
+    """)

@@ -70,14 +70,26 @@ def daily_totals(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def by_column(frame: pd.DataFrame, column: str) -> pd.DataFrame:
-    """Totals grouped by any column — model, project, product, whatever."""
+    """Totals grouped by any column — model, project, product, whatever.
+
+    `share` is share of DOLLARS. A share of tokens would rank rows by how
+    much context they re-read, which is a fact about caching rather than
+    about where the money went.
+    """
     if frame.empty:
-        return pd.DataFrame(columns=[column, "estimated_cost", "output_tokens", "calls"])
+        return pd.DataFrame(
+            columns=[column, "estimated_cost", "total_tokens", "output_tokens",
+                     "calls", "sessions", "share"]
+        )
+
+    working = frame.copy()
+    working["total_tokens"] = schema.total_tokens(frame)
 
     grouped = (
-        frame.groupby(column, observed=True)
+        working.groupby(column, observed=True)
         .agg(
             estimated_cost=("estimated_cost", "sum"),
+            total_tokens=("total_tokens", "sum"),
             output_tokens=("output_tokens", "sum"),
             calls=("model", "size"),
             sessions=("session_id", "nunique"),
@@ -85,6 +97,8 @@ def by_column(frame: pd.DataFrame, column: str) -> pd.DataFrame:
         .reset_index()
         .sort_values("estimated_cost", ascending=False)
     )
+    total = grouped["estimated_cost"].sum()
+    grouped["share"] = grouped["estimated_cost"] / total if total else 0.0
     return grouped
 
 
@@ -274,3 +288,172 @@ def cost_if_all_on_model(frame: pd.DataFrame, model: str) -> float:
             cache_read_tokens=int(frame["cache_read_tokens"].sum()),
         ).total
     )
+
+
+# ---------------------------------------------------------------- periods
+
+# The quick ranges offered above the dashboard. "Total" means everything
+# loaded; "Custom" is handled by the date pickers rather than here.
+PERIODS = ("Day", "Week", "Month", "Total", "Custom")
+
+PERIOD_DAYS = {"Day": 1, "Week": 7, "Month": 30}
+
+
+def period_slice(
+    frame: pd.DataFrame,
+    period: str,
+    today: Optional[date] = None,
+) -> pd.DataFrame:
+    """The rows inside one of the quick ranges.
+
+    The windows are ROLLING, not calendar: "Week" means the last 7 days
+    including today, not Monday-to-now. A calendar week would make Monday
+    morning show almost nothing and Sunday night show a full week, which
+    reads as a usage collapse every seven days rather than as an artefact of
+    the calendar.
+
+    "Month" here is the last 30 days for the same reason. The month-to-date
+    figure the hero shows is a genuine calendar month — those are different
+    questions, and month_slice() answers the other one.
+    """
+    if period == "Total" or frame.empty:
+        return frame
+
+    days = PERIOD_DAYS.get(period)
+    if days is None:                       # "Custom", or anything unexpected
+        return frame
+
+    today = today or date.today()
+    # Inclusive of today, so Day = today only, Week = today and the 6 before.
+    start = pd.Timestamp(today) - pd.Timedelta(days=days - 1)
+    return frame[frame["date"] >= start]
+
+
+@dataclass(frozen=True)
+class HeadlineStats:
+    """The four tiles across the top."""
+
+    last_7_cost: float
+    last_30_cost: float
+    daily_average: float
+    month_to_date_cost: float
+    active_days: int
+
+
+def headline_stats(
+    frame: pd.DataFrame,
+    today: Optional[date] = None,
+) -> HeadlineStats:
+    """Recent spend at three zoom levels, plus the calendar month.
+
+    The average is per ACTIVE day, not per calendar day. Dividing by calendar
+    days would quietly answer a different question -- "what does an average
+    day cost, including the ones I didn't work?" -- and produce a number that
+    falls every weekend without any change in behaviour.
+    """
+    today = today or date.today()
+    if frame.empty:
+        return HeadlineStats(0.0, 0.0, 0.0, 0.0, 0)
+
+    def spend(days: int) -> float:
+        start = pd.Timestamp(today) - pd.Timedelta(days=days - 1)
+        return float(frame.loc[frame["date"] >= start, "estimated_cost"].sum())
+
+    active_days = int(frame["date"].nunique())
+    total = float(frame["estimated_cost"].sum())
+
+    return HeadlineStats(
+        last_7_cost=spend(7),
+        last_30_cost=spend(30),
+        daily_average=total / active_days if active_days else 0.0,
+        month_to_date_cost=float(month_slice(frame, today)["estimated_cost"].sum()),
+        active_days=active_days,
+    )
+
+
+# ---------------------------------------------------------------- breakdowns
+
+# The columns the breakdown tables show, in order. `reasoning` sits apart from
+# the rest on purpose: it is already inside `output`, so it is shown for
+# interest and never added in. See burnrate.schema.REPORTED_COLUMNS.
+BREAKDOWN_COLUMNS = [
+    "total_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "reasoning_tokens",
+    "sessions",
+    "estimated_cost",
+]
+
+
+def _breakdown(frame: pd.DataFrame, by: str) -> pd.DataFrame:
+    """Shared body of the two breakdown tables.
+
+    `cached` folds the three cache columns together, which is safe HERE and
+    nowhere else: this table reports counts, and the cost column beside it was
+    computed before the fold, from the three columns priced separately. The
+    chart rule about never merging cache kinds is about PRICING them, and no
+    pricing happens here.
+    """
+    if frame.empty:
+        return pd.DataFrame(columns=[by] + BREAKDOWN_COLUMNS)
+
+    working = frame.copy()
+    working["cached_tokens"] = (
+        working["cache_write_5m_tokens"]
+        + working["cache_write_1h_tokens"]
+        + working["cache_read_tokens"]
+    )
+    working["total_tokens"] = schema.total_tokens(frame)
+
+    grouped = (
+        working.groupby(by, observed=True)
+        .agg(
+            total_tokens=("total_tokens", "sum"),
+            input_tokens=("input_tokens", "sum"),
+            output_tokens=("output_tokens", "sum"),
+            cached_tokens=("cached_tokens", "sum"),
+            reasoning_tokens=("reasoning_tokens", "sum"),
+            sessions=("session_id", "nunique"),
+            estimated_cost=("estimated_cost", "sum"),
+        )
+        .reset_index()
+    )
+    return grouped
+
+
+def daily_breakdown(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per day, newest first."""
+    return _breakdown(frame, "date").sort_values("date", ascending=False)
+
+
+def project_breakdown(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per project, most expensive first."""
+    return _breakdown(frame, "project").sort_values("estimated_cost", ascending=False)
+
+
+def by_product(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per tool, for the summary cards.
+
+    `share` is share of DOLLARS, not of tokens. Tokens would rank the tools by
+    how much context they re-read, which is close to meaningless as a measure
+    of how much a tool is being used.
+    """
+    if frame.empty:
+        return pd.DataFrame(columns=["product", "estimated_cost", "share", "models", "calls"])
+
+    grouped = (
+        frame.groupby("product", observed=True)
+        .agg(
+            estimated_cost=("estimated_cost", "sum"),
+            models=("model", "nunique"),
+            calls=("model", "size"),
+            sessions=("session_id", "nunique"),
+        )
+        .reset_index()
+        .sort_values("estimated_cost", ascending=False)
+    )
+    total = grouped["estimated_cost"].sum()
+    grouped["share"] = grouped["estimated_cost"] / total if total else 0.0
+    return grouped

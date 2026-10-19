@@ -74,6 +74,7 @@ def _fake_session(rng: random.Random, day: date, models, weights) -> List[dict]:
 
     for _ in range(calls):
         context += rng.randint(500, 4_000)
+        output_tokens = rng.randint(60, 2_500)
 
         rows.append(
             {
@@ -85,12 +86,16 @@ def _fake_session(rng: random.Random, day: date, models, weights) -> List[dict]:
                 "session_id": session_id,
                 # Fresh input is small — almost everything is served from cache.
                 "input_tokens": rng.randint(4, 120),
-                "output_tokens": rng.randint(60, 2_500),
+                "output_tokens": output_tokens,
                 # Claude Code writes to the 1-hour cache, so the fake data does
                 # too — otherwise development would be tuned to the wrong price.
                 "cache_write_5m_tokens": 0,
                 "cache_write_1h_tokens": rng.randint(400, 6_000),
                 "cache_read_tokens": int(context * rng.uniform(0.85, 1.0)),
+                # A SUBSET of output_tokens, never more — the schema validates
+                # this, so fake data that broke it would fail the tests rather
+                # than quietly teach the dashboard a shape real data never has.
+                "reasoning_tokens": int(output_tokens * rng.uniform(0.0, 0.45)),
                 "estimated_cost": None,  # filled in by burnrate.pricing
                 "source": "fake",
                 "is_estimate": True,

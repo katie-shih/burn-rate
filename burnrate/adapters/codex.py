@@ -285,6 +285,9 @@ def _row_from_usage(
         # reasoning_output_tokens is already inside output_tokens. Adding it
         # would bill the same thinking twice. See point 3 above.
         "output_tokens": _count(usage, "output_tokens"),
+        # Point 3 above: this is already inside output_tokens. Carried through
+        # for display only, never added to a total.
+        "reasoning_tokens": _count(usage, "reasoning_output_tokens"),
         # OpenAI has one cache write tier; see "ON CACHE WRITES" above.
         "cache_write_5m_tokens": _count(usage, "cache_write_input_tokens"),
         "cache_write_1h_tokens": 0,

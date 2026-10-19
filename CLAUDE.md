@@ -72,6 +72,7 @@ Nothing downstream knows or cares where a row came from.
 | `cache_write_5m_tokens` | Written into the 5-minute cache — costs 1.25x input |
 | `cache_write_1h_tokens` | Written into the 1-hour cache — costs 2.00x input |
 | `cache_read_tokens` | Read back out of the cache — costs 0.10x input |
+| `reasoning_tokens` | Thinking tokens — **already inside `output_tokens`**, never summed |
 | `estimated_cost` | Dollars, from the formula below |
 | `source` | Which adapter produced the row |
 | `is_estimate` | `True` = computed by us, `False` = a real billed figure |
@@ -85,6 +86,12 @@ months) is a grouping of those rows.
   still show one combined "cached" number; it just adds them up (`schema.cache_write_tokens`).
 - Added **`project`**. "Break usage down by project" is a must-have and there was nowhere to put
   the project name. Hiding it inside `session_id` would have been a trap for later.
+- Added **`reasoning_tokens`** (session 5). Claude Code reports it as
+  `output_tokens_details.thinking_tokens`, Codex as `reasoning_output_tokens`. It is a **subset of
+  `output_tokens`**, not an addition, so it lives in `schema.REPORTED_COLUMNS` rather than
+  `TOKEN_COLUMNS`. `total_tokens()` and the cost formula both read `TOKEN_COLUMNS` alone, so the
+  double-count cannot happen by accident, and `schema.validate` rejects any row claiming more
+  reasoning than output — the sign of an adapter reading the wrong field.
 
 ## The cost formula, in plain English
 
@@ -222,7 +229,7 @@ are not stylistic preferences:
 Forms to avoid, each for a reason: no pie or donut charts (people compare angles
 badly — part-to-whole belongs in a stacked bar); no one-bar bar charts (that's a
 number, so show a stat tile — this happens live when only one model is in range);
-no dual axes; exactly one hero number per screen.
+no dual axes; exactly one hero number per screen — **with one deliberate exception**, below.
 
 ## The oxblood theme
 
@@ -514,3 +521,130 @@ Parley. All unchanged and all optional.
   the two side-by-side chart columns; not broken, but not designed for.
 - Streamlit caches imported modules, so **a theme change needs a server restart**,
   not just a browser refresh. This cost three confusing cycles in this session.
+
+**Session 5 — 2026-10-19**
+- Reshaped the dashboard towards a TokenTracker-style layout, section by section, with Katie
+  choosing each one. Added: a **period selector** (Day / Week / Month / Total / Custom) that
+  replaces the sidebar date picker; a **token + cost hero pair**; four **trend tiles**
+  (7d / 30d / per active day / month); **tool cards**; and a **tabbed breakdown**
+  (Daily / By project / By session) with token-type columns.
+- Deliberately **not** added, after discussion: the two-column rail, the activity heatmap, the
+  ranked model list (the bar chart compares magnitudes better), lifetime "started / active days",
+  and the Share button — which uploads usage data and would break the privacy rule outright.
+- **Two hero numbers is a deliberate exception** to the one-hero rule. The argument the dashboard
+  makes is that tokens and dollars disagree; showing one alone is the misreading the page exists
+  to prevent. The token caption says outright that the number is mostly cache reads.
+- Added `reasoning_tokens` to the schema. See the note in the common-format section above — the
+  important part is that it is a subset of output and is structurally prevented from being summed.
+- **Bug caught while building:** the period slice was being applied before the headline stats were
+  computed, so picking "Day" made "Last 30 days" mean today, and the month-end forecast saw one
+  day. The stats now read a `scoped` frame — filtered by tool and project, but across all time.
+- Rolling windows, not calendar ones: "Week" is the last 7 days including today, so a Monday
+  morning doesn't read as a usage collapse. The daily average divides by **active** days, so it
+  doesn't sag every weekend without anything changing.
+- Two CSS fixes found only by inspecting the live DOM: the period pills needed
+  `:has(input:checked)` and the option text is a `<p>` (so the global paragraph colour painted it
+  cream-on-cream), and the radio circle is a nested `div`, not the span wrapping the input.
+- **Removed the sidebar entirely.** Everything moved onto the page: the title and the real/fake
+  data toggle share the top row, the two filters live in a closed `Filters` expander beside the
+  period pills, and the price provenance and load report moved to a two-column footer. Load
+  *warnings* stayed at the top, because a warning that the numbers are incomplete is no use once
+  you have already read them. No `st.sidebar` call remains, which is what actually removes the
+  panel — `initial_sidebar_state="collapsed"` would have left the expand arrow behind.
+- **Katie then trimmed the page back**, by explicit request: removed the real/fake data toggle,
+  the "mostly cache reads" note, the averaging caption, the **month-end forecast**, the
+  "estimates, not bills / scope" banner, the tool-cards caption, and the whole **"Where you could
+  save"** section. Stat tiles were centred and reordered widest-window-first (month to date,
+  30d, 7d, per active day).
+- **Three of those are must-haves in the Scope section above**, and they are now built but not
+  displayed. Recorded here so the gap is visible rather than forgotten:
+  - *Month-end forecast* — `analysis.forecast_month_end` and its tests are untouched.
+  - *A "where you could save" suggestion* — `burnrate/insights.py` and its tests are untouched.
+  - *Labels distinguishing estimated from billed* — **partly retained**: the cost hero still reads
+    "what this would have cost at API prices — not a bill", and the tables still say "Estimated
+    value". What went is the fuller explanation and the scope note saying Claude chat, Cowork and
+    Parley are not counted.
+
+  Each is a few lines in `app.py` to restore; nothing was deleted from the library or the tests.
+- **A second trim**, again by request: added a "Track your token usage" subtitle; dropped "not a
+  bill" from the cost hero; made the stat tiles **beige with oxblood type**; removed the caption
+  under the daily trend; moved **Where it goes above Daily trend**; removed the **"Tokens are not
+  dollars"** section; and rebuilt Where it goes as **stacked** charts, each with a Tokens / Value /
+  Share table on its right.
+- Added a **fixed scroll rail** on the left — section links plus a fill that tracks scroll
+  position. It is **pure CSS**: `st.markdown` strips `<script>`, so there is no scroll listener.
+  `section[data-testid="stMain"]` (the real scroller — `scroll(root)` would silently do nothing)
+  publishes a named scroll timeline and the fill animates along it. Measured: 0% scroll → 0px,
+  50% → 65px, 100% → 130px of a 130px track.
+- **Gotcha worth keeping:** `st.markdown` reads any line indented four spaces as a literal code
+  block, so an indented `<div>` renders as escaped source. `textwrap.dedent` does **not** fix it —
+  it strips only the common prefix, and one flush-left line makes that prefix zero.
+  `theme._markdown_safe()` flattens every line instead.
+- **The validated five-colour palette is now mostly unused.** With the tokens-vs-dollars chart
+  gone, nothing on the page draws `TOKEN_COLORS`; every chart uses `ACCENT` alone. The checker
+  still validates all five, which is now insurance for a chart that no longer exists rather than a
+  check on what is on screen. `analysis.token_mix` / `token_mix_long` are likewise unused by
+  `app.py`, though still tested.
+- **Tool tiles** became square beige cards with oxblood type and the real Claude and OpenAI marks
+  beside each name, vendored in `burnrate/logos/` from Simple Icons (CC0 for the files; the marks
+  themselves remain Anthropic's and OpenAI's trademarks, used descriptively — see
+  `burnrate/logos/SOURCE.md`). Read off disk, never fetched, and recoloured via `currentColor` so
+  a mark never needs editing when the palette changes. Tiles cap at four per row to stay square.
+- **"Where it goes" is three fixed-width panels per section — labels, bars, numbers — hconcat'd.**
+  The names had to come OUT of the y axis to make the two sections line up with each other: Vega
+  sizes an axis to its longest label, so `claude-opus-5` and
+  `demonstrate-your-ability-to-use-this` produced different left margins and the bars started at
+  different x positions. With the names as their own 170px column, alignment is arithmetic rather
+  than a hope. Measured in the browser: both sections' SVGs start at x=160 and both first bars at
+  x=363.
+  - Names truncate at 24 characters with an ellipsis so they fit the column.
+  - **Rows are keyed on the FULL name, never the shortened one.** Two long names can shorten to
+    the same string, and keying on display text would silently merge them into one row.
+  - No table gridlines, because there is no table; no duplicate name column, because the label
+    panel is the name column.
+- **Added a Recommendations section** as the last panel: three short, numbered cards, each an
+  action plus one clause citing a figure from the user's own data. `insights.recommendations()`
+  is the action-shaped sibling of `savings_suggestions()` and reads the same numbers from
+  `analysis`, so the two cannot contradict each other — there is a test for exactly that.
+  - **The order is fixed, not sorted by dollars, and that is deliberate.** Only some rules have a
+    saving that can honestly be computed. "Cache reads are 99% of your tokens" is an amount AT
+    STAKE, not a recoverable one — you cannot stop a model re-reading its own context — so
+    ranking it alongside a real saving would imply a calculation that was never done. The caption
+    says the ordering is by typical impact, and promises nothing.
+  - A rule that does not apply stays silent, so a quiet month yields fewer cards rather than
+    filler. Advice with no number behind it is the thing this project avoids everywhere else.
+  - This partly restores what the earlier trim removed, in a shorter form. The long-form
+    `savings_suggestions()` is still unused by `app.py`.
+- The scroll rail's breakpoint rose to **1250px**, because the "Where it goes" panels are a fixed
+  ~870px and the rail may only appear where there is room for both. "RECOMMENDATIONS" is the
+  longest label and sets the rail's width, which is why its tracking is tighter than the label
+  tracking used elsewhere.
+- **Panels and tables have rounded corners**, at one radius (`theme.PANEL_CORNER`, 6px) shared by
+  the charts, the HTML cards and the dataframes, so a chart and a tile never disagree by two
+  pixels. Charts use Vega's `config.view.cornerRadius`; dataframes need `overflow: hidden`
+  alongside the radius, or the square grid shows through the rounded corner.
+- **Gotcha, the second of its kind:** `page_css` sets `span {{ color: INK }}` globally, and a rule
+  that targets an element beats a colour merely *inherited* from its parent. So the tile's label
+  came out cream-on-beige until the colour was set inline on the span itself. Any text placed on
+  the beige tiles needs its own inline colour.
+- Tests: **95**, up from 79.
+
+### Where things stand at the end of session 5
+
+89 tests green, palette passes, accuracy still 0.0000% on both tools.
+
+**Known soft spots:**
+
+- With two tools, the "By tool" cards are a two-card row. Honest, but thin.
+- Four things are now built, tested and **not displayed**: the month-end forecast, the savings
+  suggestions, the tokens-vs-dollars comparison, and the five-colour token palette. That is a lot
+  of maintained code behind a page that does not call it. Worth either restoring them or deciding
+  deliberately to delete them, rather than leaving the question open.
+- The scroll rail needs ≥1101px; below that it hides rather than crowd the content.
+- The filters are now one click further away than they were in the sidebar. That is the trade for
+  a full-width page; if they get used often, promoting them back out of the expander is a one-line
+  change.
+- `reasoning_tokens` is 0 for most historical rows — Claude Code only reports it on thinking
+  turns — so the column often reads as a row of zeros.
+- The "Last 30 days" tile and the hero can show the same number when the period is Month. Correct,
+  but it looks like a duplicate until you change the period.

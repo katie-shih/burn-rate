@@ -60,6 +60,7 @@ def test_forecast_scales_the_daily_rate_to_the_full_month():
                 "cache_write_5m_tokens": 0,
                 "cache_write_1h_tokens": 0,
                 "cache_read_tokens": 0,
+                "reasoning_tokens": 0,
                 "estimated_cost": 1.0,
                 "source": "test",
                 "is_estimate": True,
@@ -175,3 +176,219 @@ def test_cheaper_model_suggestion_is_absent_with_no_claude_usage():
 
     titles = [s.title for s in insights.savings_suggestions(rows)]
     assert not any(t.startswith("The same tokens on Sonnet 5") for t in titles)
+
+
+# ---- reasoning tokens: reported, never totalled -------------------------
+
+
+def test_reasoning_is_never_added_to_a_total():
+    """The whole reason reasoning_tokens sits outside TOKEN_COLUMNS.
+
+    Thinking tokens are already inside output_tokens. If they ever leaked
+    into the summed columns, every total on the dashboard would inflate and
+    nothing would look obviously wrong.
+    """
+    assert "reasoning_tokens" not in schema.TOKEN_COLUMNS
+    assert "reasoning_tokens" in schema.REPORTED_COLUMNS
+
+    rows = add_estimated_cost(fake.generate(days=5, seed=9))
+    rows.loc[:, "reasoning_tokens"] = rows["output_tokens"]  # the extreme case
+
+    before = schema.total_tokens(rows).sum()
+    rows.loc[:, "reasoning_tokens"] = 0
+    after = schema.total_tokens(rows).sum()
+
+    assert before == after, "total_tokens must not depend on reasoning_tokens"
+
+
+def test_reasoning_larger_than_output_is_rejected():
+    """An adapter reading the wrong field must fail loudly, not silently."""
+    rows = add_estimated_cost(fake.generate(days=3, seed=10))
+    rows.loc[0, "reasoning_tokens"] = int(rows.loc[0, "output_tokens"]) + 1
+
+    with pytest.raises(schema.SchemaError) as caught:
+        schema.validate(rows)
+    assert "reasoning" in str(caught.value)
+
+
+def test_breakdown_cached_column_is_the_three_cache_kinds():
+    rows = add_estimated_cost(fake.generate(days=4, seed=11))
+    table = analysis.daily_breakdown(rows)
+
+    expected = int(
+        rows["cache_write_5m_tokens"].sum()
+        + rows["cache_write_1h_tokens"].sum()
+        + rows["cache_read_tokens"].sum()
+    )
+    assert int(table["cached_tokens"].sum()) == expected
+    # And the totals still agree with the schema's own sum.
+    assert int(table["total_tokens"].sum()) == int(schema.total_tokens(rows).sum())
+
+
+def test_breakdowns_preserve_the_money():
+    """However the table is grouped, the dollars must still add up."""
+    rows = add_estimated_cost(fake.generate(days=12, seed=12))
+    total = rows["estimated_cost"].sum()
+
+    for table in (analysis.daily_breakdown(rows), analysis.project_breakdown(rows)):
+        assert table["estimated_cost"].sum() == pytest.approx(total)
+
+
+# ---- period slicing ----------------------------------------------------
+
+
+def test_period_windows_are_rolling_and_inclusive_of_today():
+    """Day means today; Week means today plus the six before it.
+
+    Rolling rather than calendar, so a Monday morning doesn't read as a
+    collapse in usage just because a calendar week restarted.
+    """
+    today = date(2026, 10, 19)
+    rows = add_estimated_cost(fake.generate(days=60, end=today, seed=13))
+
+    day = analysis.period_slice(rows, "Day", today)
+    week = analysis.period_slice(rows, "Week", today)
+    month = analysis.period_slice(rows, "Month", today)
+    total = analysis.period_slice(rows, "Total", today)
+
+    assert day["date"].nunique() <= 1
+    assert week["date"].min() >= pd.Timestamp(today) - pd.Timedelta(days=6)
+    assert month["date"].min() >= pd.Timestamp(today) - pd.Timedelta(days=29)
+    assert len(total) == len(rows)
+    # Each window contains the next one down.
+    assert len(day) <= len(week) <= len(month) <= len(total)
+
+
+def test_custom_period_does_not_slice():
+    """'Custom' is handled by the date pickers, not by period_slice."""
+    rows = add_estimated_cost(fake.generate(days=20, seed=14))
+    assert len(analysis.period_slice(rows, "Custom")) == len(rows)
+
+
+# ---- headline stats ----------------------------------------------------
+
+
+def test_daily_average_uses_active_days_not_calendar_days():
+    """Dividing by calendar days answers a different question.
+
+    It would make the average fall every weekend without any change in how
+    the tools were used.
+    """
+    today = date(2026, 10, 19)
+    rows = add_estimated_cost(fake.generate(days=40, end=today, seed=15))
+    stats = analysis.headline_stats(rows, today)
+
+    active = rows["date"].nunique()
+    assert stats.active_days == active
+    assert stats.daily_average == pytest.approx(
+        rows["estimated_cost"].sum() / active
+    )
+    # Fewer active days than calendar days means a higher average than the
+    # naive calculation would give.
+    assert stats.daily_average > rows["estimated_cost"].sum() / 40
+
+
+def test_headline_windows_nest():
+    today = date(2026, 10, 19)
+    rows = add_estimated_cost(fake.generate(days=60, end=today, seed=16))
+    stats = analysis.headline_stats(rows, today)
+    assert stats.last_7_cost <= stats.last_30_cost
+
+
+def test_headline_stats_on_an_empty_frame():
+    stats = analysis.headline_stats(schema.empty_frame())
+    assert stats.active_days == 0
+    assert stats.daily_average == 0.0
+
+
+def test_product_shares_sum_to_one():
+    rows = add_estimated_cost(fake.generate(days=10, seed=17))
+    codex = rows.iloc[[0]].copy()
+    codex["product"] = "codex"
+    codex["provider"] = "openai"
+    codex["model"] = "gpt-6.1-sol"
+    combined = add_estimated_cost(
+        schema.coerce(pd.concat([rows, codex], ignore_index=True))
+    )
+
+    products = analysis.by_product(combined)
+    assert len(products) == 2
+    assert products["share"].sum() == pytest.approx(1.0)
+
+
+# ---- recommendations ---------------------------------------------------
+
+
+def test_recommendations_are_capped_and_grounded():
+    """Short, actionable, and never more than asked for."""
+    rows = add_estimated_cost(fake.generate(days=40, seed=21))
+    recs = insights.recommendations(rows)
+
+    assert 0 < len(recs) <= 3
+    for rec in recs:
+        assert rec.action and rec.because
+        # An imperative, not a paragraph.
+        assert len(rec.action) < 60
+        # Every one cites a figure from the data rather than offering an opinion.
+        assert any(ch.isdigit() for ch in rec.because)
+
+
+def test_recommendation_limit_is_respected():
+    rows = add_estimated_cost(fake.generate(days=40, seed=22))
+    assert len(insights.recommendations(rows, limit=1)) == 1
+    assert len(insights.recommendations(rows, limit=2)) == 2
+
+
+def test_no_recommendations_for_an_empty_frame():
+    assert insights.recommendations(schema.empty_frame()) == []
+
+
+def test_a_rule_stays_quiet_when_it_does_not_apply():
+    """Silence is the right answer when the data does not support a rule.
+
+    Filler advice with no number behind it is exactly what the rest of this
+    project avoids, so a rule that cannot fire must produce nothing rather
+    than something generic.
+    """
+    rows = add_estimated_cost(fake.generate(days=20, seed=23))
+
+    # No cache reads at all -> the "fresh session" rule has nothing to say.
+    no_cache = rows.copy()
+    no_cache["cache_read_tokens"] = 0
+    no_cache = add_estimated_cost(schema.coerce(no_cache))
+    actions = [r.action for r in insights.recommendations(no_cache)]
+    assert not any("fresh session" in a for a in actions)
+
+    # No thinking tokens -> the reasoning rule has nothing to say.
+    no_reasoning = rows.copy()
+    no_reasoning["reasoning_tokens"] = 0
+    no_reasoning = add_estimated_cost(schema.coerce(no_reasoning))
+    actions = [r.action for r in insights.recommendations(no_reasoning)]
+    assert not any("reasoning" in a.lower() for a in actions)
+
+
+def test_cheaper_model_recommendation_ignores_other_vendors():
+    """Same scoping as the long-form suggestion: Codex cannot run Claude."""
+    rows = add_estimated_cost(fake.generate(days=10, seed=24))
+    rows["provider"] = "openai"
+    rows["model"] = "gpt-6.1-sol"
+    openai_only = add_estimated_cost(schema.coerce(rows))
+
+    actions = [r.action for r in insights.recommendations(openai_only)]
+    assert not any("smaller model" in a for a in actions)
+
+
+def test_recommendations_agree_with_the_long_form_suggestions():
+    """The two engines read the same numbers, so they must not contradict.
+
+    If the long-form rule says long sessions cost more, the short rule has to
+    agree — otherwise the page would argue with itself.
+    """
+    rows = add_estimated_cost(fake.generate(days=40, seed=25))
+
+    long_form = [s.title for s in insights.savings_suggestions(rows)]
+    short_form = [r.action for r in insights.recommendations(rows, limit=4)]
+
+    said_long_sessions = any("longer sessions" in t for t in long_form)
+    recs_long_sessions = any("Break long sessions" in a for a in short_form)
+    assert said_long_sessions == recs_long_sessions

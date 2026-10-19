@@ -133,6 +133,14 @@ def check_text() -> int:
         # Axis labels are small but sparse; WCAG still asks 4.5 for them.
         ("axis labels on surface", theme.INK_MUTED, theme.SURFACE, MIN_CONTRAST_TEXT),
         ("hero number on page", theme.INK, theme.PAGE, MIN_CONTRAST_LARGE_TEXT),
+        # The stat tiles run the palette backwards: dark type on a beige
+        # ground. Contrast is symmetric, but the MUTED pairing is not -- a
+        # muted ink chosen against the dark surface can be too light here.
+        ("tile value on beige", theme.TILE_INK, theme.TILE_SURFACE, MIN_CONTRAST_TEXT),
+        ("tile label on beige", theme.TILE_INK_MUTED, theme.TILE_SURFACE,
+         MIN_CONTRAST_TEXT),
+        ("beige tile against page", theme.TILE_SURFACE, theme.PAGE,
+         MIN_CONTRAST_MARK),
     ]
 
     failures = 0
