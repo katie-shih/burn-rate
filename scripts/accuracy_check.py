@@ -83,19 +83,24 @@ def hand_calculation(session_id, prices):
 
     entry = prices["models"][model]
     input_price = entry["input_per_mtok"]
-    output_price = entry["output_per_mtok"]
-    multipliers = prices["cache_multipliers"]
 
+    # Each line has its own published price, read straight out of prices.yaml.
+    # Nothing is derived from the input price any more.
     lines = [
-        ("input", totals["input"], input_price, 1.0),
-        ("output", totals["output"], output_price, 1.0),
-        ("cache write 5m", totals["write_5m"], input_price, multipliers["write_5m"]),
-        ("cache write 1h", totals["write_1h"], input_price, multipliers["write_1h"]),
-        ("cache read", totals["read"], input_price, multipliers["read"]),
+        ("input", totals["input"], input_price),
+        ("output", totals["output"], entry["output_per_mtok"]),
+        ("cache write 5m", totals["write_5m"], entry["cache_write_5m_per_mtok"]),
+        ("cache write 1h", totals["write_1h"], entry["cache_write_1h_per_mtok"]),
+        ("cache read", totals["read"], entry["cache_read_per_mtok"]),
     ]
 
-    priced = [(label, tokens, price, mult, tokens / 1e6 * price * mult)
-              for label, tokens, price, mult in lines]
+    # The "vs in" column is printed for information only -- it shows how each
+    # price compares to fresh input, which is what makes the cache discount
+    # legible. It takes no part in the arithmetic below.
+    priced = [
+        (label, tokens, price, price / input_price, tokens / 1e6 * price)
+        for label, tokens, price in lines
+    ]
 
     return {
         "model": model,
@@ -144,7 +149,7 @@ def main():
 
         print(f"  model: {manual['model']}    API calls: {manual['calls']:,}")
         print()
-        print(f"  {'piece':<16}{'tokens':>14}  {'$/Mtok':>8} {'x':>6}    {'cost':>10}")
+        print(f"  {'piece':<16}{'tokens':>14}  {'$/Mtok':>8} {'vs in':>6}    {'cost':>10}")
         for label, tokens, price, mult, cost in manual["lines"]:
             print(f"  {label:<16}{tokens:>14,}  {price:>8.2f} {mult:>6.2f}    ${cost:>9.4f}")
         print(f"  {'':<16}{'':>14}  {'':>8} {'':>6}    {'-' * 10}")

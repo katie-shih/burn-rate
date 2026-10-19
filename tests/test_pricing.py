@@ -79,10 +79,77 @@ def test_zero_usage_costs_nothing(prices: PriceBook):
     assert prices.cost("claude-sonnet-5") == 0.0
 
 
-def test_flat_rate_cache_read_override_is_used(prices: PriceBook):
-    """Fable 5.1 prices cache reads at a flat $0.25/MTok, not 10% of input."""
-    parts = prices.breakdown("claude-fable-5-1", cache_read_tokens=1_000_000)
-    assert parts.cache_read_cost == pytest.approx(0.25)
+@pytest.mark.parametrize(
+    "model, read_price, share_of_input",
+    [
+        ("claude-opus-5", 0.50, 0.100),
+        ("claude-sonnet-5", 0.20, 0.100),
+        ("claude-opus-5-5", 0.20, 0.050),
+        ("claude-sonnet-5-5", 0.10, 0.050),
+        ("claude-fable-5-1", 0.25, 0.025),
+    ],
+)
+def test_cache_read_price_is_read_per_model_not_assumed(
+    prices: PriceBook, model: str, read_price: float, share_of_input: float
+):
+    """Cache reads are NOT a fixed 10% of input, and assuming so overcharges.
+
+    This is the regression test for a real bug. prices.yaml used to store only
+    input and output prices and derive cache reads as 10% of input. That is
+    right for most models but wrong for three: the two "5-5" models charge 5%
+    and Fable 5.1 charges 2.5%. claude-sonnet-5-5 had no hand-written override,
+    so it was billed at $0.20/MTok against a real price of $0.10 -- double.
+
+    Cache reads are the largest token line in Claude Code by a wide margin
+    (over 90% of tokens in a typical session), so an error here moves the
+    headline number more than an error anywhere else.
+    """
+    parts = prices.breakdown(model, cache_read_tokens=1_000_000)
+    assert parts.cache_read_cost == pytest.approx(read_price)
+
+    listed = prices.prices_for(model)
+    ratio = listed["cache_read_per_mtok"] / listed["input_per_mtok"]
+    assert ratio == pytest.approx(share_of_input)
+
+
+def test_cache_write_multipliers_do_hold_for_every_model(prices: PriceBook):
+    """The counterpart to the test above: writes really are a fixed multiple.
+
+    Every Claude model charges exactly 1.25x input for a 5-minute cache write
+    and 2.00x for a 1-hour one. That is why the old multiplier approach looked
+    sound -- it was true for four of the five prices. This test pins the
+    asymmetry down: if a future model ever breaks it, we find out here rather
+    than in a dollar figure nobody can check.
+    """
+    for model in prices.known_models:
+        p = prices.prices_for(model)
+        assert p["cache_write_5m_per_mtok"] == pytest.approx(
+            p["input_per_mtok"] * 1.25
+        ), f"{model} breaks the 1.25x rule for 5-minute cache writes"
+        assert p["cache_write_1h_per_mtok"] == pytest.approx(
+            p["input_per_mtok"] * 2.00
+        ), f"{model} breaks the 2.00x rule for 1-hour cache writes"
+
+
+def test_every_model_has_all_five_prices(prices: PriceBook):
+    """A half-priced model would quietly understate cost, so there are none."""
+    assert prices.known_models, "prices.yaml has no models at all"
+    for model in prices.known_models:
+        assert len(prices.prices_for(model)) == 5
+
+
+def test_a_model_missing_a_price_is_an_error_not_a_guess():
+    """Better a visible gap than a confident-looking invented number."""
+    book = PriceBook(
+        {"models": {"claude-half-priced": {"input_per_mtok": 5.0,
+                                           "output_per_mtok": 25.0}}}
+    )
+    with pytest.raises(UnknownModelError) as caught:
+        book.cost("claude-half-priced", cache_read_tokens=1_000_000)
+
+    message = str(caught.value)
+    assert "cache_read_per_mtok" in message
+    assert "refresh_prices" in message
 
 
 def test_unknown_model_raises_with_a_helpful_message(prices: PriceBook):

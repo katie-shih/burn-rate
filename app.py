@@ -105,7 +105,9 @@ if frame.empty:
 prices = PriceBook.load()
 st.sidebar.divider()
 st.sidebar.caption(
-    f"Prices from `prices.yaml`, fetched {prices.fetched}.\n\n"
+    f"Prices from `prices.yaml`, fetched {prices.fetched} from LiteLLM's "
+    "public price list, which tracks Anthropic's published API pricing. "
+    "Refresh with `uv run python scripts/refresh_prices.py`.\n\n"
     "Everything stays on this machine. No conversation text is ever read, "
     "and Streamlit's usage statistics are switched off."
 )

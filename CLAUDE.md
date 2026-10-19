@@ -86,25 +86,38 @@ months) is a grouping of those rows.
 
 ## The cost formula, in plain English
 
-API prices are quoted **per million tokens**. For every row in the table:
+API prices are quoted **per million tokens**. `prices.yaml` lists **five prices for every model**,
+and each line uses its own:
 
 1. **Input cost** = input_tokens ÷ 1,000,000 × the model's input price
 2. **Output cost** = output_tokens ÷ 1,000,000 × the model's output price
-3. **Cache write (5 min)** = cache_write_5m_tokens ÷ 1,000,000 × input price × **1.25**
-4. **Cache write (1 hour)** = cache_write_1h_tokens ÷ 1,000,000 × input price × **2.00**
-5. **Cache read** = cache_read_tokens ÷ 1,000,000 × input price × **0.10**
-   (reading from the cache costs 10% of normal input — a 90% discount)
+3. **Cache write (5 min)** = cache_write_5m_tokens ÷ 1,000,000 × the model's 5m cache write price
+4. **Cache write (1 hour)** = cache_write_1h_tokens ÷ 1,000,000 × the model's 1h cache write price
+5. **Cache read** = cache_read_tokens ÷ 1,000,000 × the model's cache read price
 6. **Total** = add all five together.
 
-**Worked example** — one session on Claude Opus 5 ($5.00 input / $25.00 output per million):
+**Nothing is derived from the input price.** An earlier version stored only input and output and
+multiplied: 1.25x for a 5-minute cache write, 2.00x for an hour, 0.10x for a read. Four of those
+five were right. The cache read one was not — `claude-opus-5-5` and `claude-sonnet-5-5` charge
+**5%** of input, and `claude-fable-5-1` charges **2.5%**. Sonnet 5.5 had no hand-written override,
+so it was billed at double its real cache-read price. Since cache reads are over 90% of the tokens
+in a typical Claude Code session, that is the most expensive thing in the formula to get wrong.
+Looking all five up per model leaves no rule to be wrong about.
+
+Cache **writes** genuinely are a steady 1.25x and 2.00x of input across every model — which is why
+the multiplier approach looked sound. `tests/test_pricing.py` pins that down, so if a future model
+ever breaks it, a test says so rather than a dollar figure nobody can check.
+
+**Worked example** — one session on Claude Opus 5. Its five prices, straight from `prices.yaml`:
+input $5.00, output $25.00, 5m cache write $6.25, 1h cache write $10.00, cache read $0.50.
 
 | Piece | Tokens | Math | Cost |
 |---|---|---|---|
 | Input | 50,000 | 0.05 × $5.00 | $0.25 |
 | Output | 8,000 | 0.008 × $25.00 | $0.20 |
-| Cache write, 5 min | 40,000 | 0.04 × $5.00 × 1.25 | $0.25 |
-| Cache write, 1 hour | 80,000 | 0.08 × $5.00 × 2.00 | $0.80 |
-| Cache read | 900,000 | 0.90 × $5.00 × 0.10 | $0.45 |
+| Cache write, 5 min | 40,000 | 0.04 × $6.25 | $0.25 |
+| Cache write, 1 hour | 80,000 | 0.08 × $10.00 | $0.80 |
+| Cache read | 900,000 | 0.90 × $0.50 | $0.45 |
 | **Total** | | | **$1.95** |
 
 Note how cache reads dominate the token count but take under a quarter of the cost. Any chart that
@@ -129,13 +142,32 @@ are facts about the log format, checked against 9 real log files:
 
 ## Where prices come from
 
-A script fetches current prices from Anthropic's public pricing page and writes them to a local
-`prices.yaml` (model, input price, output price, cache multipliers, date fetched). The dashboard
-**only ever reads `prices.yaml`** — it never calls the network while running.
+`scripts/refresh_prices.py` downloads [LiteLLM's public price
+list](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and
+rewrites `prices.yaml`. The dashboard **only ever reads `prices.yaml`** — it never calls the
+network while running.
 
-This keeps prices current without breaking the privacy rule: the fetch sends no usage data, just
-asks for a public page, and the result is a plain text file Katie can read and correct by hand.
-`prices.yaml` is committed to git so the numbers are versioned.
+**Why LiteLLM rather than scraping Anthropic's pricing page:** it is machine-readable JSON rather
+than HTML that changes shape, and it lists all five prices per model explicitly instead of making
+us derive the cache prices. The trade-off is that it is a third-party list, one step removed from
+the vendor. Two things make that acceptable: every entry carries a `source` field pointing back to
+Anthropic's own pricing page, and `prices.yaml` is committed to git, so any price change shows up
+as a reviewable diff rather than silently moving the numbers.
+
+The script keeps exactly the entries whose `litellm_provider` is `anthropic` — the models Anthropic
+sells directly, which is what Claude Code uses. LiteLLM also lists Bedrock and Vertex copies of the
+same models under different keys and at different prices; those are the wrong prices under names
+our logs never contain. Those plain keys (`claude-opus-5`) match the log `model` field exactly, so
+no name translation is needed.
+
+**It is built to fail safe.** It refuses to write if the download yields no Anthropic models, skips
+any model missing one of its five prices rather than half-pricing it, and warns if a price breaks a
+rule that has always held (output dearer than input, cache writes dearer than input, cache reads
+cheaper). A bad fetch leaves the working `prices.yaml` untouched. `--dry-run` shows the changes
+without writing.
+
+Privacy is unaffected: the fetch sends no usage data, just asks for a public file, and the result is
+a plain text file Katie can read and correct by hand.
 
 ## Chart and design rules
 
@@ -214,7 +246,7 @@ burn-rate/
   `prices.yaml`; drop subscription cost tracking; stretch goal is Parley API logging.
 - Confirmed Claude Code logs exist at `~/.claude/projects/` (3 project folders).
 - Built the foundation: git repo, `uv` for Python (3.14) and packages, `schema.py`, `pricing.py`,
-  the fake-data adapter, and 15 tests — all passing. The CLAUDE.md worked example ($1.65) is a
+  the fake-data adapter, and 15 tests — all passing. The CLAUDE.md worked example ($1.95) is a
   test, so the docs and the code can't drift apart.
 - Added a `project` column to the schema (see note above).
 - Wrote the real Claude Code adapter and inspected the actual logs. Two findings changed the cost
@@ -272,3 +304,38 @@ uv run python scripts/accuracy_check.py   # prove the cost maths against real lo
   reasoning rather than a test.
 - Only one model appears in the logs so far, so the by-model view has never been exercised with
   real variety.
+
+**Session 2 — 2026-10-19**
+- Changed the price source to [LiteLLM's public price
+  list](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
+  Machine-readable JSON instead of a web page to scrape, and it publishes all five prices per
+  model rather than only two. See "Where prices come from" above for the trade-off.
+- Built `scripts/refresh_prices.py`, which three files already referenced but which had never
+  been written. It fetches, filters to `litellm_provider == anthropic`, sanity-checks, reports
+  every change, and refuses to overwrite a working `prices.yaml` with a bad download.
+- **Found and fixed a real pricing bug.** The old file derived cache-read prices as 10% of input.
+  That is right for most models but wrong for three, and `claude-sonnet-5-5` had no override — so
+  its cache reads were priced at **double** the real rate. Not yet visible in the dashboard, since
+  the logs only contain `claude-opus-5`, but it would have been the first time Sonnet 5.5 appeared.
+- `prices.yaml` now lists all five prices explicitly and covers 22 models, up from 11. Nothing was
+  dropped. `pricing.py` no longer derives anything; a model missing a price is an error, not a guess.
+- Tests: **58 passing**, up from 34. The new ones cover per-model cache-read prices (including the
+  bug, verified by reintroducing it and watching the test fail), the write multipliers that *do*
+  hold universally, and the refresh script's refusals. `accuracy_check.py` now prices each line
+  from its own published number instead of multiplying input.
+- Accuracy check still passes at **0.0000%** difference on all three real sessions — expected, since
+  Opus 5's explicit prices equal the old derived ones, but checked rather than assumed.
+- Fixed a stale figure in the session 1 notes: the worked example totals $1.95, not $1.65.
+
+### Where things stand at the end of session 2
+
+All must-haves still built. 58 tests green, both checkpoints still passing. The cost formula no
+longer rests on any assumption about cache pricing.
+
+**Open decisions, unchanged from session 1:** the stretch goal (Parley vs `plan-usage-history.json`),
+whether to fold `mba_materials` into `mba-advisor`, and dark mode.
+
+**One new soft spot:** `prices.yaml` is now generated rather than hand-written, so a wrong number
+upstream becomes a wrong number here. The guards against that are the sanity checks in the script,
+the change report it prints before writing, and the git diff. None of them would catch a plausible
+but incorrect price — only an implausible one.

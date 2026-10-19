@@ -2,14 +2,23 @@
 
 Prices are quoted per MILLION tokens. For one row of usage:
 
-    input cost          = input_tokens          / 1e6 * input_price
-    output cost         = output_tokens         / 1e6 * output_price
-    cache write (5 min) = cache_write_5m_tokens / 1e6 * input_price * 1.25
-    cache write (1 hr)  = cache_write_1h_tokens / 1e6 * input_price * 2.00
-    cache read          = cache_read_tokens     / 1e6 * input_price * 0.10
+    input cost          = input_tokens          / 1e6 * input price
+    output cost         = output_tokens         / 1e6 * output price
+    cache write (5 min) = cache_write_5m_tokens / 1e6 * 5m cache write price
+    cache write (1 hr)  = cache_write_1h_tokens / 1e6 * 1h cache write price
+    cache read          = cache_read_tokens     / 1e6 * cache read price
     total               = the five added together
 
 That is the whole thing. Everything else in this file is bookkeeping around it.
+
+All five prices are looked up per model in prices.yaml. Earlier versions stored
+only input and output and worked the three cache prices out by multiplying the
+input price — 1.25x for a 5-minute cache write, 2.00x for an hour, 0.10x for a
+read. The two write multipliers hold for every Claude model, but the read one
+does not: claude-opus-5-5 and claude-sonnet-5-5 charge 5% of input, and
+claude-fable-5-1 charges 2.5%. Since cache reads are by far the largest token
+line in Claude Code, assuming 10% overcharged those models two- and four-fold.
+Reading the real price for each model leaves no rule to be wrong about.
 
 The two kinds of cache write are kept apart because they cost 1.25x and 2.00x —
 a 60% difference. Claude Code turns out to use the 1-hour cache exclusively, so
@@ -31,7 +40,21 @@ DEFAULT_PRICES_PATH = os.path.join(
 
 
 class UnknownModelError(KeyError):
-    """Raised when we have no price for a model."""
+    """Raised when we cannot price a model.
+
+    Covers both "never heard of it" and "listed, but missing some of its five
+    prices". Both mean the same thing downstream: we must not invent a number.
+    """
+
+
+# The five prices every model needs, and the token column each one applies to.
+PRICE_FIELDS = {
+    "input_per_mtok": "input_tokens",
+    "output_per_mtok": "output_tokens",
+    "cache_write_5m_per_mtok": "cache_write_5m_tokens",
+    "cache_write_1h_per_mtok": "cache_write_1h_tokens",
+    "cache_read_per_mtok": "cache_read_tokens",
+}
 
 
 @dataclass(frozen=True)
@@ -75,12 +98,9 @@ class PriceBook:
 
     def __init__(self, data: Dict):
         self._models: Dict[str, Dict] = data.get("models") or {}
-        multipliers = data.get("cache_multipliers") or {}
-        self.cache_write_multiplier: float = float(multipliers.get("write_5m", 1.25))
-        self.cache_write_1h_multiplier: float = float(multipliers.get("write_1h", 2.00))
-        self.cache_read_multiplier: float = float(multipliers.get("read", 0.10))
         self.fetched: Optional[str] = data.get("fetched")
         self.source: Optional[str] = data.get("source")
+        self.upstream: Optional[str] = data.get("upstream")
 
     # ---- loading -------------------------------------------------------
 
@@ -109,6 +129,31 @@ class PriceBook:
         cache_read_tokens: int = 0,
     ) -> CostBreakdown:
         """Cost of one row of usage, split into its pieces."""
+        price = self.prices_for(model)
+        per_million = lambda tokens: tokens / TOKENS_PER_MILLION
+
+        return CostBreakdown(
+            input_cost=per_million(input_tokens) * price["input_per_mtok"],
+            output_cost=per_million(output_tokens) * price["output_per_mtok"],
+            cache_write_5m_cost=(
+                per_million(cache_write_5m_tokens) * price["cache_write_5m_per_mtok"]
+            ),
+            cache_write_1h_cost=(
+                per_million(cache_write_1h_tokens) * price["cache_write_1h_per_mtok"]
+            ),
+            cache_read_cost=(
+                per_million(cache_read_tokens) * price["cache_read_per_mtok"]
+            ),
+        )
+
+    def prices_for(self, model: str) -> Dict[str, float]:
+        """The five prices for one model, or an error naming what is missing.
+
+        Nothing is derived or defaulted here. A model we cannot fully price is
+        an error rather than a guess, because a quietly wrong price is worse
+        than a visible gap -- it still produces a confident-looking dollar
+        figure, and nothing downstream can tell it was invented.
+        """
         if model not in self._models:
             raise UnknownModelError(
                 "No price for model %r. Known models: %s. "
@@ -117,33 +162,15 @@ class PriceBook:
             )
 
         entry = self._models[model]
-        input_price = float(entry["input_per_mtok"])
-        output_price = float(entry["output_per_mtok"])
+        missing = [field for field in PRICE_FIELDS if field not in entry]
+        if missing:
+            raise UnknownModelError(
+                "prices.yaml has model %r but is missing %s. "
+                "Run scripts/refresh_prices.py to rewrite the file, or add the "
+                "missing price(s) by hand." % (model, ", ".join(missing))
+            )
 
-        # A few models price cache reads as a flat rate rather than as a
-        # multiple of the input price. prices.yaml can say so per model.
-        if "cache_read_per_mtok" in entry:
-            cache_read_price = float(entry["cache_read_per_mtok"])
-        else:
-            cache_read_price = input_price * self.cache_read_multiplier
-
-        per_million = lambda tokens: tokens / TOKENS_PER_MILLION
-
-        return CostBreakdown(
-            input_cost=per_million(input_tokens) * input_price,
-            output_cost=per_million(output_tokens) * output_price,
-            cache_write_5m_cost=(
-                per_million(cache_write_5m_tokens)
-                * input_price
-                * self.cache_write_multiplier
-            ),
-            cache_write_1h_cost=(
-                per_million(cache_write_1h_tokens)
-                * input_price
-                * self.cache_write_1h_multiplier
-            ),
-            cache_read_cost=per_million(cache_read_tokens) * cache_read_price,
-        )
+        return {field: float(entry[field]) for field in PRICE_FIELDS}
 
     def cost(self, model: str, **tokens) -> float:
         """Just the total, when you don't need the pieces."""

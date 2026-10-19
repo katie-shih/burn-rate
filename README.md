@@ -80,6 +80,26 @@ machine.
 ## Checking the numbers yourself
 
 Costs are computed from `prices.yaml`, a plain text file you can read and edit.
+It lists five prices for every model — input, output, the two kinds of cache
+write, and cache read — and the dashboard never calls the network while running.
+
+To update those prices:
+
+```bash
+uv run python scripts/refresh_prices.py
+```
+
+That downloads [LiteLLM's public price
+list](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json),
+keeps the models Anthropic sells directly, and rewrites `prices.yaml`. It
+prints every price that changed before writing, and refuses to write at all if
+the download looks wrong — so a bad fetch can't quietly wipe working prices.
+Add `--dry-run` to see the changes without writing. It sends nothing about your
+usage; it asks for a public file and that is the whole conversation.
+
+`prices.yaml` is committed to git on purpose, so any price change shows up as a
+reviewable diff rather than silently moving your numbers.
+
 To verify the maths against your own logs:
 
 ```bash
@@ -114,3 +134,8 @@ Both will silently corrupt your numbers if you write your own version of this:
 2. **Claude Code uses the 1-hour cache**, which costs 2.00x the input price,
    not the 1.25x of the 5-minute cache. The split is in
    `usage.cache_creation`.
+3. **Cache reads are not a fixed share of the input price.** Most models charge
+   10% of input, but `claude-opus-5-5` and `claude-sonnet-5-5` charge 5% and
+   `claude-fable-5-1` charges 2.5%. Since cache reads are over 90% of the
+   tokens in a typical session, assuming 10% everywhere is the single most
+   expensive mistake available. Look the price up per model.
