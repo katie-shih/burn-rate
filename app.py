@@ -16,7 +16,8 @@ import pandas as pd
 import streamlit as st
 
 from burnrate import analysis, insights, theme
-from burnrate.adapters import claude_code, fake
+from burnrate import adapters
+from burnrate.adapters import fake
 from burnrate.pricing import PriceBook, add_estimated_cost, unpriced_models
 
 st.set_page_config(page_title="Burn Rate", page_icon="🔥", layout="wide")
@@ -49,12 +50,26 @@ st.markdown(
 )
 
 
+# How each `product` value is written for a human. One place, so a tool is
+# never called "claude_code" in one panel and "Claude Code" in another.
+PRODUCT_LABELS = {
+    "claude_code": "Claude Code",
+    "codex": "Codex",
+}
+
+# Where each tool's usage is read from, for the scope note.
+PRODUCT_SOURCES = {
+    "claude_code": "`~/.claude/projects`",
+    "codex": "`~/.codex/sessions`",
+}
+
+
 # ---------------------------------------------------------------- data
 
 @st.cache_data(show_spinner=False)
 def load_real():
-    report = claude_code.LoadReport()
-    return add_estimated_cost(claude_code.load(report=report)), report
+    frame, report = adapters.load_all()
+    return add_estimated_cost(frame), report
 
 
 @st.cache_data(show_spinner=False)
@@ -76,7 +91,8 @@ frame, report = load_real() if use_real else load_fake()
 if frame.empty:
     st.title("Burn Rate")
     st.warning(
-        "No Claude Code usage logs found in `~/.claude/projects`. "
+        "No usage logs found — looked for Claude Code in `~/.claude/projects` "
+        "and Codex in `~/.codex/sessions`. "
         "Turn off **Use my real logs** in the sidebar to explore with sample data."
     )
     st.stop()
@@ -92,6 +108,17 @@ if isinstance(picked, tuple) and len(picked) == 2:
         (frame["date"] >= pd.Timestamp(start)) & (frame["date"] <= pd.Timestamp(end))
     ]
 
+# Only offer the tool filter when there is more than one tool to choose
+# between — a filter with a single option is furniture, not a control.
+products = sorted(frame["product"].dropna().unique())
+if len(products) > 1:
+    picked_products = st.sidebar.multiselect(
+        "Tools", products, default=products,
+        format_func=lambda name: PRODUCT_LABELS.get(name, name),
+    )
+    if picked_products:
+        frame = frame[frame["product"].isin(picked_products)]
+
 projects = sorted(frame["project"].dropna().unique())
 chosen = st.sidebar.multiselect("Projects", projects, default=projects)
 if chosen:
@@ -106,7 +133,7 @@ prices = PriceBook.load()
 st.sidebar.divider()
 st.sidebar.caption(
     f"Prices from `prices.yaml`, fetched {prices.fetched} from LiteLLM's "
-    "public price list, which tracks Anthropic's published API pricing. "
+    "public price list, which tracks Anthropic's and OpenAI's published API pricing. "
     "Refresh with `uv run python scripts/refresh_prices.py`.\n\n"
     "Everything stays on this machine. No conversation text is ever read, "
     "and Streamlit's usage statistics are switched off."
@@ -176,12 +203,26 @@ with tiles:
             "project from. A forecast appears after a week of data."
         )
 
+# Name the tools actually in view, so the scope note cannot drift out of date
+# as sources are added. It reads off the data, not off a hard-coded sentence.
+tools_in_view = [
+    PRODUCT_LABELS.get(name, name)
+    for name in sorted(frame["product"].dropna().unique())
+]
+if len(tools_in_view) == 1:
+    scope = f"**Scope: {tools_in_view[0]} only.**"
+else:
+    scope = "**Scope: " + " and ".join(
+        [", ".join(tools_in_view[:-1]), tools_in_view[-1]]
+    ) + ".**"
+
 st.info(
     "**These are estimates, not bills.** Every figure is *API-equivalent value*: "
     "what this usage would have cost at pay-as-you-go API prices. You paid through "
-    "MIT's Claude Enterprise plan, so none of it was billed to you directly.\n\n"
-    "**Scope: Claude Code only.** Usage from Claude chat, Cowork and MIT's Parley "
-    "is not included — none of it is logged on this machine.",
+    "MIT's Claude Enterprise plan and a Codex subscription, so none of it was "
+    "billed to you per token.\n\n"
+    f"{scope} Usage from Claude chat, Cowork and MIT's Parley is not included — "
+    "none of it is logged on this machine.",
     icon="ℹ️",
 )
 
@@ -220,7 +261,7 @@ trend = (
 )
 st.altair_chart(theme.style(trend), width="stretch")
 st.caption(
-    f"{quiet_days} of {len(daily)} days in this range had no Claude Code usage. "
+    f"{quiet_days} of {len(daily)} days in this range had no recorded usage. "
     "Quiet days are shown as gaps rather than skipped, so the trend isn't flattered."
 )
 
@@ -429,6 +470,6 @@ for suggestion in found:
 st.divider()
 st.caption(
     "Burn Rate runs entirely on your machine. It reads token counts and metadata "
-    "from Claude Code's local logs and never stores, sends, or even parses "
+    "from Claude Code's and Codex's local logs and never stores, sends, or even parses "
     "conversation text."
 )

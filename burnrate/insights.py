@@ -105,31 +105,48 @@ def _long_sessions_cost_more_per_call(frame: pd.DataFrame) -> Optional[Suggestio
 
 
 def _cheaper_model_comparison(frame: pd.DataFrame) -> Optional[Suggestion]:
-    """What the identical tokens would have cost on a cheaper model."""
-    actual = float(frame["estimated_cost"].sum())
+    """What the identical tokens would have cost on a cheaper model.
+
+    Anthropic usage only. Pricing OpenAI tokens at Sonnet rates would produce
+    a number, but not an action: Codex cannot run a Claude model, so "this
+    would have been cheaper on Sonnet" is not advice anyone can take. The
+    comparison is restricted to the usage that could actually move.
+    """
+    claude_only = frame[frame["provider"] == "anthropic"]
+    if claude_only.empty:
+        return None
+
+    actual = float(claude_only["estimated_cost"].sum())
     if actual <= 0:
         return None
 
-    models_used = set(frame["model"].dropna().astype(str))
+    models_used = set(claude_only["model"].dropna().astype(str))
     if models_used == {"claude-sonnet-5"} or not models_used:
         return None
 
-    alternative = analysis.cost_if_all_on_model(frame, "claude-sonnet-5")
+    alternative = analysis.cost_if_all_on_model(claude_only, "claude-sonnet-5")
     if pd.isna(alternative) or alternative >= actual:
         return None
 
     saving = actual - alternative
+    # Only mention the restriction when there is something to restrict.
+    scope = (
+        "Your Claude usage cost"
+        if len(frame) != len(claude_only)
+        else "Your usage cost"
+    )
     return Suggestion(
         title="The same tokens on Sonnet 5 would have cost less",
         detail=(
-            f"Your usage cost ${actual:,.2f}. The identical token counts priced at "
+            f"{scope} ${actual:,.2f}. The identical token counts priced at "
             f"Sonnet 5 rates come to ${alternative:,.2f} — a difference of "
             f"${saving:,.2f} ({saving / actual:.0%})."
         ),
         dollars=saving,
         caveat=(
             "A rough comparison, not a promise. A cheaper model may need more "
-            "turns to finish the same job, which eats into the saving."
+            "turns to finish the same job, which eats into the saving. "
+            "Covers Claude usage only — Codex cannot run a Claude model."
         ),
     )
 

@@ -3,9 +3,10 @@
 A dashboard that shows how much AI you've used and what it would have cost at
 API prices. It runs on your own computer and your data never leaves it.
 
-If you use Claude through a subscription or a university plan, you don't get an
-itemised bill — so it's hard to know whether you're using a little or a lot.
-Burn Rate reads Claude Code's local logs and puts a dollar figure on it.
+If you use AI coding tools through a subscription or a university plan, you
+don't get an itemised bill — so it's hard to know whether you're using a little
+or a lot. Burn Rate reads **Claude Code** and **Codex** local logs and puts a
+dollar figure on them, in one table.
 
 **Those dollar figures are estimates, not bills.** They're *API-equivalent
 value*: what the same usage would have cost at pay-as-you-go prices.
@@ -15,8 +16,13 @@ value*: what the same usage would have cost at pay-as-you-go prices.
 ## What you need
 
 - A Mac or Linux machine
-- Claude Code, with some usage history (Burn Rate reads `~/.claude/projects/`)
+- At least one of:
+  - **Claude Code**, with some usage history (read from `~/.claude/projects/`)
+  - **Codex**, with some usage history (read from `~/.codex/sessions/`)
 - No Python required — the installer below brings its own
+
+Whichever you have is used; a tool you don't have is simply absent, not an
+error. A **Tools** filter appears in the sidebar once there is more than one.
 
 ## Install
 
@@ -64,9 +70,13 @@ really a chart of your caching behaviour.
 
 ## What it does *not* cover
 
-Only **Claude Code** usage. Claude chat (claude.ai), Cowork, and other
-platforms aren't included, because none of them keep usage records on your
-machine.
+Only **Claude Code** and **Codex** usage. Claude chat (claude.ai), Cowork, and
+other platforms aren't included, because none of them keep usage records on
+your machine.
+
+Codex rollouts that have been compressed (`.jsonl.zst`) aren't read yet. If any
+are found, the sidebar says how many were skipped rather than quietly reporting
+less usage than you had.
 
 ---
 
@@ -124,9 +134,12 @@ format — nothing else in the project needs to change. See
 [`burnrate/schema.py`](burnrate/schema.py) for the columns and
 [`fake.py`](burnrate/adapters/fake.py) for the simplest example.
 
-## Two things about Claude Code's logs
+## Gotchas in the logs
 
-Both will silently corrupt your numbers if you write your own version of this:
+Every one of these will silently corrupt your numbers if you write your own
+version of this. **The most important lesson is the last one.**
+
+### Claude Code
 
 1. **One API call is written as several log lines** — one per content block,
    each repeating the same token counts. Counting every line overstates usage
@@ -139,3 +152,31 @@ Both will silently corrupt your numbers if you write your own version of this:
    `claude-fable-5-1` charges 2.5%. Since cache reads are over 90% of the
    tokens in a typical session, assuming 10% everywhere is the single most
    expensive mistake available. Look the price up per model.
+
+### Codex
+
+Codex writes `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; the line that
+matters is `token_usage_record`.
+
+1. **`input_tokens` *includes* the cached tokens** — the opposite of Claude
+   Code. You can prove it from the file: `total_tokens` equals
+   `input_tokens + output_tokens` exactly, so cached is already inside input.
+   Fresh input is `input_tokens - cached_input_tokens`.
+2. **`turn_token_usage` and `thread_token_usage` are running totals**, not
+   per-call figures. Only `usage` is this call's own numbers. Summing either of
+   the other two multiplies your answer.
+3. **`reasoning_output_tokens` is already inside `output_tokens`.** Adding it
+   bills reasoning twice.
+4. **The model isn't in the usage record.** It's in the `turn_context` line
+   that comes before it, so the file has to be read in order. Sessions really
+   do switch model partway through.
+
+Deduplicate on `response_id`.
+
+### The lesson worth keeping
+
+Those first three Codex points are each the **reverse** of how Claude Code
+behaves. "Does `input_tokens` include the cache?" is a property of one tool, not
+of the industry — so every new source has to be checked from scratch rather than
+assumed to match the last one. Getting that single question backwards misprices
+the largest token line you have.

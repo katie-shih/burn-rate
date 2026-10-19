@@ -47,7 +47,7 @@ class UnknownModelError(KeyError):
     """
 
 
-# The five prices every model needs, and the token column each one applies to.
+# Every price we know about, and the token column each one applies to.
 PRICE_FIELDS = {
     "input_per_mtok": "input_tokens",
     "output_per_mtok": "output_tokens",
@@ -55,6 +55,10 @@ PRICE_FIELDS = {
     "cache_write_1h_per_mtok": "cache_write_1h_tokens",
     "cache_read_per_mtok": "cache_read_tokens",
 }
+
+# Input and output are universal: every model charges for both, so a model
+# lacking either is broken rather than merely different.
+ALWAYS_REQUIRED = ("input_per_mtok", "output_per_mtok")
 
 
 @dataclass(frozen=True)
@@ -129,30 +133,50 @@ class PriceBook:
         cache_read_tokens: int = 0,
     ) -> CostBreakdown:
         """Cost of one row of usage, split into its pieces."""
-        price = self.prices_for(model)
+        counts = {
+            "input_per_mtok": input_tokens,
+            "output_per_mtok": output_tokens,
+            "cache_write_5m_per_mtok": cache_write_5m_tokens,
+            "cache_write_1h_per_mtok": cache_write_1h_tokens,
+            "cache_read_per_mtok": cache_read_tokens,
+        }
+        # A price is only needed where there are tokens to charge for it.
+        # See prices_for() for why that is not a loophole.
+        price = self.prices_for(
+            model, require=[field for field, count in counts.items() if count]
+        )
         per_million = lambda tokens: tokens / TOKENS_PER_MILLION
 
+        def cost(field: str) -> float:
+            return per_million(counts[field]) * price.get(field, 0.0)
+
         return CostBreakdown(
-            input_cost=per_million(input_tokens) * price["input_per_mtok"],
-            output_cost=per_million(output_tokens) * price["output_per_mtok"],
-            cache_write_5m_cost=(
-                per_million(cache_write_5m_tokens) * price["cache_write_5m_per_mtok"]
-            ),
-            cache_write_1h_cost=(
-                per_million(cache_write_1h_tokens) * price["cache_write_1h_per_mtok"]
-            ),
-            cache_read_cost=(
-                per_million(cache_read_tokens) * price["cache_read_per_mtok"]
-            ),
+            input_cost=cost("input_per_mtok"),
+            output_cost=cost("output_per_mtok"),
+            cache_write_5m_cost=cost("cache_write_5m_per_mtok"),
+            cache_write_1h_cost=cost("cache_write_1h_per_mtok"),
+            cache_read_cost=cost("cache_read_per_mtok"),
         )
 
-    def prices_for(self, model: str) -> Dict[str, float]:
-        """The five prices for one model, or an error naming what is missing.
+    def prices_for(self, model: str, require=None) -> Dict[str, float]:
+        """The prices a model publishes, erroring if a needed one is absent.
 
-        Nothing is derived or defaulted here. A model we cannot fully price is
-        an error rather than a guess, because a quietly wrong price is worse
-        than a visible gap -- it still produces a confident-looking dollar
-        figure, and nothing downstream can tell it was invented.
+        Not every model has all five prices, and that is a fact about the
+        vendors rather than a gap in the data. The 5-minute / 1-hour cache
+        split is Anthropic's design: no OpenAI model has a 1-hour cache write
+        price, and most have no cache write price at all. Demanding five
+        prices from everyone would make the file unable to describe OpenAI.
+
+        So a price is required only where there are tokens to charge for it.
+        `require` names the price fields this call actually needs; anything
+        absent and unneeded is left out of the returned dict and multiplies
+        nothing. That keeps the real guarantee intact -- we still never invent
+        a price for tokens we are charging for -- while letting a model say
+        "I have no such tier" instead of "I am broken".
+
+        Nothing is derived or defaulted. A quietly wrong price is worse than a
+        visible gap, because it still produces a confident-looking dollar
+        figure that nothing downstream can tell was invented.
         """
         if model not in self._models:
             raise UnknownModelError(
@@ -162,15 +186,31 @@ class PriceBook:
             )
 
         entry = self._models[model]
-        missing = [field for field in PRICE_FIELDS if field not in entry]
+        available = {
+            field: float(entry[field]) for field in PRICE_FIELDS if field in entry
+        }
+
+        needed = set(ALWAYS_REQUIRED) | set(require or ())
+        missing = [field for field in PRICE_FIELDS if field in needed and field not in available]
         if missing:
             raise UnknownModelError(
-                "prices.yaml has model %r but is missing %s. "
-                "Run scripts/refresh_prices.py to rewrite the file, or add the "
-                "missing price(s) by hand." % (model, ", ".join(missing))
+                "prices.yaml has model %r but is missing %s, and this usage "
+                "has tokens in %s. Run scripts/refresh_prices.py to rewrite "
+                "the file, or add the missing price(s) by hand."
+                % (
+                    model,
+                    ", ".join(missing),
+                    ", ".join(PRICE_FIELDS[field] for field in missing),
+                )
             )
 
-        return {field: float(entry[field]) for field in PRICE_FIELDS}
+        return available
+
+    def provider_of(self, model: str) -> Optional[str]:
+        """Which vendor sells this model, as recorded in prices.yaml."""
+        entry = self._models.get(model) or {}
+        provider = entry.get("provider")
+        return str(provider) if provider else None
 
     def cost(self, model: str, **tokens) -> float:
         """Just the total, when you don't need the pieces."""

@@ -112,7 +112,7 @@ def test_cache_read_price_is_read_per_model_not_assumed(
     assert ratio == pytest.approx(share_of_input)
 
 
-def test_cache_write_multipliers_do_hold_for_every_model(prices: PriceBook):
+def test_cache_write_multipliers_do_hold_for_every_claude_model(prices: PriceBook):
     """The counterpart to the test above: writes really are a fixed multiple.
 
     Every Claude model charges exactly 1.25x input for a 5-minute cache write
@@ -120,8 +120,14 @@ def test_cache_write_multipliers_do_hold_for_every_model(prices: PriceBook):
     sound -- it was true for four of the five prices. This test pins the
     asymmetry down: if a future model ever breaks it, we find out here rather
     than in a dollar figure nobody can check.
+
+    Anthropic only. The 5m/1h split is Anthropic's design, and no OpenAI model
+    publishes a 1-hour price at all.
     """
-    for model in prices.known_models:
+    claude = [m for m in prices.known_models if prices.provider_of(m) == "anthropic"]
+    assert claude, "prices.yaml has no Anthropic models"
+
+    for model in claude:
         p = prices.prices_for(model)
         assert p["cache_write_5m_per_mtok"] == pytest.approx(
             p["input_per_mtok"] * 1.25
@@ -131,11 +137,63 @@ def test_cache_write_multipliers_do_hold_for_every_model(prices: PriceBook):
         ), f"{model} breaks the 2.00x rule for 1-hour cache writes"
 
 
-def test_every_model_has_all_five_prices(prices: PriceBook):
-    """A half-priced model would quietly understate cost, so there are none."""
+def test_every_model_has_input_and_output_prices(prices: PriceBook):
+    """A half-priced model would quietly understate cost, so there are none.
+
+    Only input and output are universal. The cache prices are per-vendor: see
+    PriceBook.prices_for for why an absent one is a fact rather than a gap.
+    """
     assert prices.known_models, "prices.yaml has no models at all"
     for model in prices.known_models:
-        assert len(prices.prices_for(model)) == 5
+        p = prices.prices_for(model)
+        assert p["input_per_mtok"] > 0
+        assert p["output_per_mtok"] > 0
+
+
+def test_no_openai_model_has_a_one_hour_cache_price(prices: PriceBook):
+    """The fact that forced the schema decision, pinned down.
+
+    If OpenAI ever adds a 1-hour cache tier, this test fails and we should
+    start reading it rather than leaving the column at zero for Codex rows.
+    """
+    openai = [m for m in prices.known_models if prices.provider_of(m) == "openai"]
+    assert openai, "prices.yaml has no OpenAI models"
+
+    with_1h = [
+        m for m in openai if "cache_write_1h_per_mtok" in prices.prices_for(m)
+    ]
+    assert with_1h == []
+
+
+def test_a_codex_shaped_row_prices_without_a_one_hour_price(prices: PriceBook):
+    """The whole point of requiring prices only where tokens are.
+
+    Codex rows always have 0 in the 1-hour column, so a model with no 1-hour
+    price must still price cleanly.
+    """
+    parts = prices.breakdown(
+        "gpt-6.1-sol",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cache_read_tokens=1_000_000,
+        cache_write_1h_tokens=0,
+    )
+    assert parts.cache_write_1h_cost == 0.0
+    assert parts.total > 0
+
+
+def test_tokens_in_a_column_with_no_price_are_an_error(prices: PriceBook):
+    """...and the loophole stays shut.
+
+    The moment a Codex row actually HAS 1-hour cache tokens, we must refuse to
+    price it rather than silently charging those tokens nothing.
+    """
+    with pytest.raises(UnknownModelError) as caught:
+        prices.cost("gpt-6.1-sol", cache_write_1h_tokens=1_000)
+
+    message = str(caught.value)
+    assert "cache_write_1h_per_mtok" in message
+    assert "cache_write_1h_tokens" in message
 
 
 def test_a_model_missing_a_price_is_an_error_not_a_guess():

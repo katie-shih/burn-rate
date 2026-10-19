@@ -46,7 +46,9 @@ Python (3.11 or 3.12) before the first `pip install`, and use a virtual environm
 - Labels that make clear what's **estimated** vs. **actually billed**
 - At least one "here's where you could save" suggestion
 
-**Stretch — only one, only if the must-haves are done:** Parley API usage logging.
+**Stretch — done:** a second tool. Codex (`~/.codex/sessions/**/rollout-*.jsonl`) is read by its
+own adapter, proving the common-format design: `schema.py` did not change, and nothing downstream
+of it knows Codex exists. Parley remains unbuilt.
 
 **Out of scope:** anomaly detection, budget alerts, per-task logging, admin API connections,
 subscription cost tracking (deliberately dropped — the question is how usage sits *inside* the
@@ -96,6 +98,13 @@ and each line uses its own:
 5. **Cache read** = cache_read_tokens ÷ 1,000,000 × the model's cache read price
 6. **Total** = add all five together.
 
+**A model lists only the prices its vendor publishes.** `pricing.py` demands a price for a token
+column only when that column actually has tokens in it. The 5-minute / 1-hour cache write split is
+Anthropic's design: no OpenAI model publishes a 1-hour price, and most publish no cache write price
+at all. An absent price means "no such tier", never "free" — usage that lands in a column with no
+price is an error, not a zero. That keeps the real guarantee (never invent a price for tokens we
+are charging for) while letting one file describe two vendors.
+
 **Nothing is derived from the input price.** An earlier version stored only input and output and
 multiplied: 1.25x for a 5-minute cache write, 2.00x for an hour, 0.10x for a read. Four of those
 five were right. The cache read one was not — `claude-opus-5-5` and `claude-sonnet-5-5` charge
@@ -140,6 +149,31 @@ are facts about the log format, checked against 9 real log files:
 - `cwd` gives the project name. Note `mba-advisor/mba_materials` shows up as its own project
   (`mba_materials`) because it's a subfolder — decide later whether to merge it into `mba-advisor`.
 
+## What Codex's logs turned out to say
+
+Codex writes `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, one JSON object per line, and the
+line that matters is `token_usage_record`. **Three of the four traps are the exact opposite of
+Claude Code**, which is the real lesson: how a tool counts tokens is a property of that tool, not
+of the industry. Every new adapter has to re-check all of this.
+
+- **`input_tokens` INCLUDES the cached tokens** — the reverse of Claude Code. Proof from the file:
+  `total_tokens` equals `input_tokens + output_tokens` exactly, so cached must already be inside
+  input. Fresh input is `input_tokens - cached_input_tokens`. Skipping that counted 97,152 cached
+  tokens as fresh input in one session, pricing them at **20x** their real rate.
+- **`turn_token_usage` and `thread_token_usage` are cumulative running totals.** Only `usage` is
+  that call's own numbers. The per-call values sum to exactly the final `thread_token_usage`.
+- **`reasoning_output_tokens` is a subset of `output_tokens`,** so adding it bills reasoning twice.
+- **The model is not in the usage record.** It is in the `turn_context` line, which appears before
+  the calls it governs, so the file has to be walked in order. Real sessions do switch model
+  mid-way: the two sessions on this machine used `gpt-6.1-sol` and `gpt-5.6-sol`.
+- Dedup key is `response_id`, the counterpart to Claude Code's `requestId`.
+- **OpenAI has one cache write tier, not Anthropic's 5-minute / 1-hour split.** Codex cache writes
+  go into the 5-minute column, whose price comes from OpenAI's own `cache_creation` figure — the
+  column name is Anthropic's vocabulary, the price is OpenAI's. The 1-hour column stays zero for
+  every Codex row, which is why it does not matter that no OpenAI model publishes a 1-hour price.
+- Codex rollouts can be compressed (`.jsonl.zst`). We do not read those yet; the adapter counts
+  them and warns, rather than silently reporting less usage than there was.
+
 ## Where prices come from
 
 `scripts/refresh_prices.py` downloads [LiteLLM's public price
@@ -154,8 +188,8 @@ the vendor. Two things make that acceptable: every entry carries a `source` fiel
 Anthropic's own pricing page, and `prices.yaml` is committed to git, so any price change shows up
 as a reviewable diff rather than silently moving the numbers.
 
-The script keeps exactly the entries whose `litellm_provider` is `anthropic` — the models Anthropic
-sells directly, which is what Claude Code uses. LiteLLM also lists Bedrock and Vertex copies of the
+The script keeps the entries whose `litellm_provider` is `anthropic` or `openai` — the models
+those vendors sell directly, which is what Claude Code and Codex use. LiteLLM also lists Bedrock and Vertex copies of the
 same models under different keys and at different prices; those are the wrong prices under names
 our logs never contain. Those plain keys (`claude-opus-5`) match the log `model` field exactly, so
 no name translation is needed.
@@ -213,6 +247,7 @@ burn-rate/
     pricing.py            # the cost formula
     adapters/
       claude_code.py      # reads ~/.claude/projects/*/*.jsonl
+      codex.py            # reads ~/.codex/sessions/**/rollout-*.jsonl
       fake.py             # generated sample data for development
   scripts/refresh_prices.py
   prices.yaml
@@ -339,3 +374,53 @@ whether to fold `mba_materials` into `mba-advisor`, and dark mode.
 upstream becomes a wrong number here. The guards against that are the sanity checks in the script,
 the change report it prints before writing, and the git diff. None of them would catch a plausible
 but incorrect price — only an implausible one.
+
+**Session 3 — 2026-10-19**
+- Looked at [TokenTracker](https://github.com/xiufengsun/TokenTracker) (46 tools, MIT licensed) to
+  see how a mature version of this does multi-tool ingestion. Five mechanisms, chosen per tool:
+  passive JSONL reads, passive SQLite reads, lifecycle hooks, plugins, and vendor API + auth token
+  lifted from local storage. Worth knowing: **the Claude Code "SessionEnd hook" is only a
+  doorbell** — it runs `notify.cjs --source=claude`, carries no usage data, and the numbers still
+  come from passively reading the JSONL. They price with LiteLLM too, arrived at independently.
+- **Built the Codex adapter.** See "What Codex's logs turned out to say" above for the four traps,
+  three of which invert Claude Code's behaviour. Verified against real logs, by hand.
+- **Changed the pricing rule** from "every model needs all five prices" to "a model needs a price
+  for each token column it actually uses" — see "The cost formula" above. Without this, `prices.yaml`
+  could not describe OpenAI at all.
+- `refresh_prices.py` now takes `anthropic` and `openai`, accepts `mode: responses` as well as
+  `chat` (**every `gpt-*-codex` model is `responses`** — accepting only `chat` would have dropped
+  exactly the models Codex runs), ignores image/audio/realtime models, and ignores `ft:` fine-tune
+  price templates, which can never match a real model id. 131 models, up from 22.
+- Each model now records its `provider`, so tests can assert Anthropic-only rules without
+  accidentally asserting them about OpenAI.
+- `burnrate/adapters/load_all()` stacks every adapter into one table. `app.py` gained a **Tools**
+  filter, and its scope banner now reads off the data instead of a hard-coded sentence.
+- **Scoped the "cheaper model" suggestion to Anthropic rows.** Pricing OpenAI tokens at Sonnet
+  rates produces a number but not an action — Codex cannot run a Claude model.
+- `accuracy_check.py` now hand-checks Codex as well, specifically to prove the cache subtraction.
+  All three Claude Code sessions **and** both Codex models agree at 0.0000%.
+- Tests: **79**, up from 58.
+
+### Where things stand at the end of session 3
+
+Two real sources, both verified by hand. The by-model view finally has real variety in it
+(`claude-opus-5`, `gpt-6.1-sol`, `gpt-5.6-sol`), which retires a soft spot from session 1.
+
+**Open decisions:**
+
+1. **`mba_materials`** still counts as its own project. Unchanged from session 1.
+2. **Dark mode** still deliberately off.
+3. **Compressed Codex rollouts** (`.jsonl.zst`) are counted and warned about, not read. Nothing on
+   this machine is compressed yet, so this is pre-emptive rather than a current gap.
+4. **Parley** remains the unbuilt stretch goal.
+
+**Known soft spots:**
+
+- Only **5 Codex API calls across 2 sessions** exist on this machine, all from one day. The adapter
+  is correct on what is there, but "correct on 5 calls" is a weaker claim than the Claude Code
+  adapter's, which has 441.
+- `prices.yaml` is now 709 lines covering 131 models, most of which will never appear in a log.
+  That is the price of a simple rule ("every model this vendor sells directly"). Still hand-editable,
+  but no longer hand-readable at a glance.
+- Codex's `cache_write_input_tokens` has been **0 in every record so far**, so the cache-write path
+  is exercised only by tests, never by real data.

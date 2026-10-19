@@ -126,3 +126,52 @@ def test_suggestions_all_carry_a_number(frame):
 def test_cache_read_suggestion_fires_on_cache_heavy_data(frame):
     titles = [s.title for s in insights.savings_suggestions(frame)]
     assert any("Re-reading context" in t for t in titles)
+
+
+def test_cheaper_model_suggestion_ignores_other_vendors():
+    """Pricing OpenAI tokens at Sonnet rates is a number, not an action.
+
+    Codex cannot run a Claude model, so the comparison has to be restricted to
+    the usage that could actually move. If it ever stops being restricted, the
+    suggested saving silently inflates by whatever Codex cost.
+    """
+    rows = add_estimated_cost(fake.generate(days=10, seed=3))
+
+    # One very expensive OpenAI row, which must not enter the comparison.
+    codex_row = rows.iloc[[0]].copy()
+    codex_row["provider"] = "openai"
+    codex_row["product"] = "codex"
+    codex_row["source"] = "codex"
+    codex_row["model"] = "gpt-6.1-sol"
+    codex_row["input_tokens"] = 50_000_000
+    codex_row["cache_read_tokens"] = 0
+    codex_row["cache_write_5m_tokens"] = 0
+    codex_row["cache_write_1h_tokens"] = 0
+    codex_row = add_estimated_cost(schema.coerce(codex_row))
+
+    claude_only = [
+        s for s in insights.savings_suggestions(rows)
+        if s.title.startswith("The same tokens on Sonnet 5")
+    ]
+    mixed = [
+        s for s in insights.savings_suggestions(
+            schema.coerce(pd.concat([rows, codex_row], ignore_index=True))
+        )
+        if s.title.startswith("The same tokens on Sonnet 5")
+    ]
+
+    assert claude_only and mixed, "the suggestion should appear in both cases"
+    assert mixed[0].dollars == pytest.approx(claude_only[0].dollars), (
+        "adding $100 of Codex usage must not change the Claude-only saving"
+    )
+    assert "Codex cannot run a Claude model" in mixed[0].caveat
+
+
+def test_cheaper_model_suggestion_is_absent_with_no_claude_usage():
+    rows = add_estimated_cost(fake.generate(days=5, seed=4))
+    rows["provider"] = "openai"
+    rows["model"] = "gpt-6.1-sol"
+    rows = add_estimated_cost(schema.coerce(rows))
+
+    titles = [s.title for s in insights.savings_suggestions(rows)]
+    assert not any(t.startswith("The same tokens on Sonnet 5") for t in titles)
