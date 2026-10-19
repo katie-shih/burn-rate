@@ -38,16 +38,9 @@ def compact(number: float) -> str:
     return f"{number:,.0f}"
 
 
-st.markdown(
-    f"""
-    <style>
-      /* Columns of numbers line up; the hero number keeps proportional figures. */
-      [data-testid="stDataFrame"] {{ font-variant-numeric: tabular-nums; }}
-      [data-testid="stMetricValue"] {{ font-size: 1.6rem; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# All styling comes from burnrate/theme.py, so colours and type live in one
+# place rather than being scattered through the layout.
+st.markdown(theme.page_css(), unsafe_allow_html=True)
 
 
 # How each `product` value is written for a human. One place, so a tool is

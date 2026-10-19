@@ -1,16 +1,24 @@
-# Pinned to the light theme on purpose: the chart palette was validated for
-# colourblind-safety against the light surface below. An automatic dark flip
-# would use colours nobody checked. A proper dark mode means re-stepping every
-# hue for the dark surface and re-running the validator — worth doing, but as a
-# deliberate piece of work rather than a side effect.
+# The oxblood theme. These values mirror burnrate/theme.py, which is the
+# source of truth — Streamlit needs them here because it paints the page
+# shell before any Python runs, so it cannot read them from the module.
+#
+# If you change a colour, change it in burnrate/theme.py, copy it here, and
+# then run:
+#
+#     uv run python scripts/check_palette.py
+#
+# That script checks every series colour is still tellable apart (including
+# by colourblind readers) and that everything still has enough contrast
+# against this background. It is not a formality: run against the previous
+# light theme it found eight real failures.
 
 [theme]
-base = "light"
-backgroundColor = "#fcfcfb"
-secondaryBackgroundColor = "#f9f9f7"
-textColor = "#0b0b0b"
-primaryColor = "#2a78d6"
-font = "sans-serif"
+base = "dark"
+backgroundColor = "#5d2627"          # PAGE
+secondaryBackgroundColor = "#672b2c" # SURFACE
+textColor = "#efeae0"                # INK
+primaryColor = "#ece8d7"             # ACCENT
+font = "sans-serif"                  # the real face is vendored; see theme.py
 
 [browser]
 gatherUsageStats = false

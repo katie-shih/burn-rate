@@ -224,10 +224,52 @@ badly — part-to-whole belongs in a stacked bar); no one-bar bar charts (that's
 number, so show a stat tile — this happens live when only one model is in range);
 no dual axes; exactly one hero number per screen.
 
-The theme is pinned to light mode in `.streamlit/config.toml`. An automatic dark
-flip would use colours nobody validated. Real dark mode means re-deriving every hue
-against the dark surface and re-running the check — worth doing deliberately, not
-as a side effect.
+## The oxblood theme
+
+The dashboard is a dark theme: oxblood ground, cream type, wide-tracked geometric
+sans, taken from a fashion-conference reference Katie supplied. This was the
+deliberate piece of work the old note deferred — every hue was re-derived against
+the dark surface, not darkened by eye.
+
+**The check is now a script you can run**, which it previously was not:
+
+```bash
+uv run python scripts/check_palette.py
+```
+
+`burnrate/colour.py` holds the maths (CIEDE2000 distance, Machado dichromacy
+simulation, WCAG contrast); the script applies it to `theme.py`. Run it after
+changing any colour. It exits non-zero on failure.
+
+**Finding worth remembering:** both `theme.py` and this file used to claim the
+palette "was checked with a colourblind-safety validator". No such validator
+existed. When one was finally written, the old light palette **failed eight
+checks** — two series nearly identical under tritanopia (ΔE 8.2), an orange and
+a green indistinguishable to protanopes (ΔE 4.7), three series below 3:1 contrast
+on white, and white labels on blue and orange fills below 4.5:1. A claim nobody
+can run is not a check.
+
+**Five series colours, not eight.** The dashboard uses exactly five categorical
+colours plus one accent. Eight mutually-distinct hues on this ground could only
+reach ΔE 11.6 — below the bar. Five reach 15.9. Shipping three colours nobody
+uses, at the cost of making the five that are used harder to tell apart, is a bad
+trade. If a sixth is ever needed, re-run the derivation rather than picking one
+by eye; the search in `scripts/` history is what keeps this honest.
+
+**The token colours are ordered, not assigned arbitrarily.** The pairs that touch
+in the stacked bar are the ones furthest apart perceptually — adjacent pairs clear
+ΔE 20.7 against a threshold of 15.
+
+**`ACCENT` is the same bone as "Input".** Single-series charts and the token stack
+never share a chart, and the stack is always legended, so nothing is ambiguous in
+practice. But it is a real overlap: the search kept placing any sixth hue almost
+on top of the bone. Worth knowing before building a chart that shows both at once.
+
+**The font is vendored, not fetched.** `burnrate/fonts/Jost-variable-latin.woff2`
+(26KB, SIL Open Font License, licence included) is embedded as a data URI. A
+Google Fonts `@import` would call Google on every page load, which would break the
+privacy rule below. Verified empirically: the running dashboard makes **zero**
+requests to any non-localhost origin.
 
 ## Privacy and secrets — non-negotiable
 
@@ -245,11 +287,15 @@ burn-rate/
   burnrate/
     schema.py             # the common format, in one place
     pricing.py            # the cost formula
+    colour.py             # colour maths for the palette check
+    theme.py              # palette, type and chart styling
+    fonts/                # the vendored typeface + its licence
     adapters/
       claude_code.py      # reads ~/.claude/projects/*/*.jsonl
       codex.py            # reads ~/.codex/sessions/**/rollout-*.jsonl
       fake.py             # generated sample data for development
   scripts/refresh_prices.py
+  scripts/check_palette.py
   prices.yaml
   tests/
   README.md               # install instructions for a classmate
@@ -424,3 +470,47 @@ Two real sources, both verified by hand. The by-model view finally has real vari
   but no longer hand-readable at a glance.
 - Codex's `cache_write_input_tokens` has been **0 in every record so far**, so the cache-write path
   is exercised only by tests, never by real data.
+
+**Session 4 — 2026-10-19**
+- **Restyled the dashboard to an oxblood/cream fashion-editorial theme** from two
+  reference images. Colours sampled rather than guessed: ground `#5d2627`, cream
+  `#c8c4bc`–`#dbd5ce`. See "The oxblood theme" above.
+- **Wrote the colourblind validator that this file had been claiming existed.**
+  `burnrate/colour.py` + `scripts/check_palette.py`. The old light palette failed
+  eight checks the moment it was finally measured. The new palette passes all of
+  them.
+- Derived the new palette by searching LCh space for the set with the largest
+  minimum perceptual distance, constrained to the reference's hue families and to
+  ≥3.2:1 contrast on oxblood. Not picked by eye — the search is in the commit.
+- Vendored **Jost** (26KB, SIL OFL) rather than using Google Fonts, which would
+  have broken the privacy rule. Confirmed with the browser's own network log that
+  the dashboard contacts nothing but localhost.
+- Three real bugs found and fixed only because the theme was checked in a browser
+  rather than assumed:
+  1. Multiselect pills rendered **cream-on-cream** — Streamlit fills them with
+     `primaryColor` and sets the text white.
+  2. Axis labels were **clipped** (`laude-opus-5`): Vega measures label width
+     before the vendored font loads, so it measures the fallback. Fixed with left
+     padding and a label limit.
+  3. Material icons rendered as **literal words** (`keyboard_arrow_right`): they
+     are a ligature font, and the global font and letter-spacing rules broke them.
+- `theme.py` now owns the whole page's CSS via `page_css()`, so `app.py` stays
+  layout-only and no colour is written inline.
+
+### Where things stand at the end of session 4
+
+Two sources, both hand-verified. 79 tests green, accuracy check at 0.0000%, and
+the palette check passes for the first time ever.
+
+**Open decisions:** `mba_materials` as its own project; compressed Codex rollouts;
+Parley. All unchanged and all optional.
+
+**Known soft spots:**
+
+- The palette check's thresholds (ΔE ≥ 15 adjacent, ≥ 10 elsewhere) are judgement
+  calls, defensible but not standards. WCAG's 3:1 and 4.5:1 are standards.
+- `ACCENT` overlapping "Input" is a real, documented compromise, not a clean win.
+- The theme was checked at 800px and 1440px wide. Narrower than ~800px squeezes
+  the two side-by-side chart columns; not broken, but not designed for.
+- Streamlit caches imported modules, so **a theme change needs a server restart**,
+  not just a browser refresh. This cost three confusing cycles in this session.

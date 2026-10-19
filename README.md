@@ -126,6 +126,25 @@ To run the test suite:
 uv run pytest
 ```
 
+## Checking the colours
+
+The dashboard is an oxblood dark theme. Its palette is validated rather than
+chosen by eye — run this after changing any colour in `burnrate/theme.py`:
+
+```bash
+uv run python scripts/check_palette.py
+```
+
+It checks three separate things: that the chart colours can be told apart
+(including by someone with any of the three common kinds of colourblindness),
+that marks are visible against the background, and that text has enough contrast.
+These really are separate — a dark red bar on a dark red ground can be perfectly
+distinguishable from every other series and still be invisible.
+
+The typeface, [Jost](https://github.com/indestructible-type/Jost), is included in
+this repo under the SIL Open Font License rather than loaded from Google Fonts, so
+the dashboard makes no network requests at all and looks the same offline.
+
 ## Adding another data source
 
 Each source has a small "adapter" in `burnrate/adapters/` that converts it into
